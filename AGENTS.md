@@ -8,7 +8,7 @@ Project knowledge base for AI coding agents.
 It communicates with CUBRID via the CAS wire protocol over TCP/IP, requiring no C extensions
 or native CCI library.
 
-- **Language**: Python 3.11+
+- **Language**: Python; minimum version is `requires-python` in [`pyproject.toml`](pyproject.toml)
 - **Protocol**: CUBRID CAS binary protocol (version 8, since CUBRID 10.2+)
 - **License**: MIT
 - **Version source**: `pycubrid.__version__` in [`pycubrid/__init__.py`](pycubrid/__init__.py)
@@ -23,11 +23,11 @@ summarizes the core responsibilities, not a complete module count.
 graph TD
     root["pycubrid/ - Main package"]
     init["__init__.py - Public API, PEP 249 globals, connect(), exports"]
-    exceptions["exceptions.py - Full PEP 249 exception hierarchy (10 classes)"]
+    exceptions[exceptions.py - Full PEP 249 exception hierarchy]
     types[types.py - PEP 249 type objects and constructors]
     constants[constants.py - CAS protocol constants]
     packet[packet.py - PacketReader/PacketWriter binary serialization]
-    protocol["protocol.py - CAS protocol packets (20 packet classes)"]
+    protocol[protocol.py - CAS protocol packet classes]
     connection[connection.py - PEP 249 Connection class]
     cursor[cursor.py - PEP 249 Cursor class]
     lob[lob.py - LOB support]
@@ -50,11 +50,11 @@ graph TD
 | Module | Role |
 |---|---|
 | `__init__.py` | PEP 249 module globals (`apilevel`, `threadsafety`, `paramstyle`), `connect()`, re-exports |
-| `exceptions.py` | `Warning`, `Error`, `InterfaceError`, `DatabaseError` + 6 subclasses |
+| `exceptions.py` | `Warning`, `Error`, `InterfaceError`, `DatabaseError` and the PEP 249 `DatabaseError` subclasses |
 | `types.py` | `DBAPIType` class, `STRING`/`BINARY`/`NUMBER`/`DATETIME`/`ROWID` type objects, constructors, typed `Set`/`Multiset`/`Sequence` parameters |
-| `constants.py` | `CASFunctionCode` (41 funcs), `CUBRIDDataType` (27+ types), `CUBRIDStatementType`, protocol/data-size constants |
+| `constants.py` | `CASFunctionCode`, `CUBRIDDataType`, `CUBRIDStatementType`, protocol/data-size constants (enum members are the source of truth) |
 | `packet.py` | Low-level binary read/write with big-endian byte ordering |
-| `protocol.py` | High-level CAS packet classes for each function code (20 packet types) |
+| `protocol.py` | High-level CAS packet classes for the implemented function codes |
 | `connection.py` | `Connection` — TCP socket management, transactions, autocommit, LOB creation, schema info |
 | `cursor.py` | `Cursor` — execute, executemany, fetch, callproc, description, iteration |
 | `lob.py` | `Lob` class — LOB type, length, file locator, packed handle |
@@ -190,7 +190,7 @@ heterogeneous failover.
 ```bash
 git clone https://github.com/cubrid-lab/pycubrid.git
 cd pycubrid
-make install          # pip install -e ".[dev]"
+make install          # pip install -e . --group dev (pip 25.1+)
 ```
 
 ### Key Commands
@@ -228,7 +228,7 @@ make integration CUBRID_TEST_PORT=33522   # any free port; default 33000
 
 - **Linter/Formatter**: Ruff
 - **Line length**: 100 characters
-- **Target Python**: 3.11+
+- **Target Python**: the `requires-python` minimum (Ruff `target-version` matches it)
 - **Imports**: `from __future__ import annotations` in every module
 - **Type hints**: Full typing; PEP 561 compliant (`py.typed`)
 - **super()**: Always `super().__init__()`, never `super(ClassName, self)`
@@ -243,21 +243,41 @@ make integration CUBRID_TEST_PORT=33522   # any free port; default 33000
 
 ## Development Workflow (cubrid-lab org standard)
 
-All non-trivial work across cubrid-lab repositories MUST follow this 4-phase cycle:
+Choose the required review route from the tool that **actually developed** the
+change; record it in the PR. A review request, green CI, self-review, or an
+automated "approval recommended" summary is not a completed review.
 
-1. **Oracle Design Review** — Consult Oracle before implementation to validate architecture, API surface, and approach. Raise concerns early.
-2. **Implementation** — Build the feature/fix with tests. Follow existing codebase patterns.
-3. **Documentation Update** — Update ALL affected docs (README, CHANGELOG, ROADMAP, API docs, SUPPORT_MATRIX, PRD, etc.) in the same PR or as an immediate follow-up. Code without doc updates is incomplete.
-4. **Oracle Post-Implementation Review** — Consult Oracle to review the completed work for correctness, edge cases, and consistency before merging.
+**OpenCode with Oracle** — for non-trivial work:
 
-Skipping any phase requires explicit justification. Trivial changes (typos, single-line fixes) may skip phases 1 and 4.
+1. Obtain an Oracle **pre-implementation design review** of the intended scope.
+2. Implement the agreed change and its tests.
+3. Update the affected behavior, API, support and release documentation with the change.
+4. Obtain an Oracle **post-implementation code review** of the resulting code,
+   address material findings and record both review outcomes and validation.
 
-Maintainers coordinate Oracle/agent tooling, integration evidence, release
-classification and the final review record. Outside contributors provide ordinary
-motivation, code, tests and affected docs; internal Oracle/agent installation or
-access is not a prerequisite for proposing a contribution.
+Trivial OpenCode edits may skip the Oracle reviews only with a recorded reason.
+The two Oracle reviews satisfy this tool's review route; an additional GitHub
+Copilot review is not automatically required. Existing repository/branch
+protection, maintainer and CI requirements still apply.
 
-Broad requests to review, fix or prepare a release are not authorization to take an
+**Standalone agents (Claude Code, Codex, ChatGPT, or other agent tools)** —
+implement and validate first, then open a GitHub PR and **wait for a substantive
+submitted GitHub Copilot review or a review from another person** before merging.
+A Copilot `COMMENTED` review with an actual code assessment can count;
+an automated suggestion without substantive assessment does not.
+Review-requested/pending status never counts.
+Triage the findings and verify accepted fixes against the final relevant head.
+If no qualifying review arrives, leave the PR unmerged (Draft/pending review);
+do not substitute Oracle reviews that were not actually performed.
+
+**Human contributions** — use the repository's ordinary contributor and review
+requirements. This route is not a fallback for unnamed standalone agents, which
+use the route above. Maintainers coordinate tooling, integration and release
+classification. No outside contributor is required to install OpenCode, Oracle,
+Claude Code, Codex or Copilot. Preserve authorship and use tool attribution only
+for work actually produced with that tool.
+
+Broad requests to review, fix or prepare a release do not authorize taking an
 assigned issue or an unclaimed `good first issue`.
 
 ## Agent PR scope and review guardrails
@@ -280,6 +300,28 @@ assigned issue or an unclaimed `good first issue`.
   routine updates, per-finding progress replies and repeated review requests.
   Preserve contributor history; revisit external PRs only after an author-updated head SHA.
 
+## Review disposition and merge evidence
+
+- Record the development/review route, reviewer or Oracle evidence (with links or
+  an identifiable record), reviewed head SHA, and whether review is pending.
+  Do not describe a Copilot "approval recommended" summary as a GitHub APPROVED
+  review; a submitted COMMENTED review is distinct from formal approval.
+- Triage each actionable finding as fixed, rejected with evidence, or deferred
+  with a linked issue and rationale. For fixes, cite the commit and focused
+  verification; for rejections, explain the contract or reproduction evidence.
+- Reply once in each relevant inline thread with its **final** disposition, not
+  repeated progress updates. A maintainer or reviewer resolves the thread only
+  after checking the updated code/evidence. An outdated or replied-to thread is
+  not automatically resolved. Do not bulk-resolve historical conversations.
+- Maintain one editable agent-owned English PR status comment for the overall
+  outcome, pending review, required CI, and unrun checks. Avoid repeated bot
+  mentions and duplicated test summaries across inline threads.
+- Verify the applicable review route and the final relevant source state before
+  merge. Never merge with unresolved critical/security findings, failed required
+  CI, or the required GitHub review still pending. Nonblocking unresolved findings
+  need a recorded maintainer disposition. This policy does not change branch
+  protection or authorize automatic merging.
+
 ## Release Process
 
 Version is single-sourced from `pycubrid/__init__.py` → `__version__ = "x.y.z"`
@@ -287,13 +329,59 @@ Version is single-sourced from `pycubrid/__init__.py` → `__version__ = "x.y.z"
 normal way to release: `release-please.yml` opens it (curated + Conventional Commit dated CHANGELOG section +
 version bump, checked by `make release-check VERSION=x.y.z`), and after the
 squash-merge `publish-pypi.yml` detects the version change and runs consistency → full
-matrix → build → tag/Release/PyPI → cookbook verification (the cookbook smoke test
-called as a pinned reusable workflow, no token) → summary on its own.
+matrix → build → candidate verification (the cookbook smoke test in candidate mode on
+the built wheel; `publish` needs it) → tag/Release/PyPI → cookbook verification (the
+cookbook smoke test called as a pinned reusable workflow, no token) → summary on its own.
 Freeze a release candidate with `autorelease: review` before branch-only note edits; wait for in-flight preparation to finish. Unfrozen notes come from main Unreleased. GITHUB_TOKEN updates require maintainer-triggered CI at the final head. Pending labels are reconciled only after successful publication and cookbook verification.
 Ordinary PRs never change `__version__` or date a CHANGELOG section. Never push
 tags or publish by hand; the only manual entry point is the narrow recovery
 dispatch of `publish-pypi.yml`. Procedure, failure matrix and recovery:
 [`RELEASING.md`](RELEASING.md).
+
+## GitHub Release Policy
+
+These rules add to the release procedure above; the procedures and gates in
+`RELEASING.md` stay authoritative.
+
+### Titles
+
+- A Release title equals its tag exactly. Stable tags and titles are `vMAJOR.MINOR.PATCH`.
+- No package name, feature, date or suffix in a title (not `pycubrid 1.2.3`,
+  `v1.2.3 — Foo`, `v1.2.3 (corrected)` or `Release v1.2.3`). Drafts follow the same rule.
+- Never move, delete or recreate a tag to fix a title. Never delete and recreate a
+  published Release.
+- Metadata edits keep the notes, assets, published state and prerelease state. When
+  editing a draft through the API, always resend `tag_name`: a PATCH without it resets
+  the draft's tag to `untagged-…`. `gh release edit` resends `tag_name` automatically;
+  raw `gh api` PATCHes must include it.
+- Automation enforces these rules: `publish-pypi.yml` creates Releases with
+  `--title "$TAG"` and, on resume or recovery, fails closed through
+  `scripts/check_release_title.py` when an existing Release has another title. It never
+  renames one. Agents verify these rules whenever they touch release automation.
+
+### Stale drafts
+
+- Inspect drafts before preparing a release. Never assume a draft is pending.
+- Classify each draft against its tag and the PyPI history:
+  - Already shipped (tag and PyPI version both exist): publish it with
+    `make_latest=false`, or remove it, only after maintainer approval.
+  - Never shipped: never publish it. Delete it only after maintainer approval.
+- Never delete drafts automatically. Preserve their notes and assets.
+
+### Release notes
+
+- `CHANGELOG.md` is the single source of truth. The Release body is the extracted
+  CHANGELOG section plus one `**Full Changelog**` compare link
+  (`scripts/extract_release_notes.py`).
+- Allowed `###` sections, in this order, only when they have content: Upgrade notes,
+  Added, Changed, Deprecated, Removed, Fixed, Security, Performance, Documentation, CI,
+  Tests. `scripts/lint_changelog.py` enforces this for `[Unreleased]` and for releases
+  after 1.10.0.
+- Use `Documentation`, not `Docs`. Put release automation and tooling entries under
+  `CI` or `Changed`.
+- Never bulk-rewrite historical notes or regenerate them from current `main`. A
+  selective fix needs a dry-run diff and maintainer approval. Never invent PR or commit
+  references. Note formatting never changes tags, dates, artifacts or publish state.
 
 ## CI Matrix
 
@@ -308,12 +396,14 @@ dispatch of `publish-pypi.yml`. Procedure, failure matrix and recovery:
 
 ### CI Matrix
 
-- PR runtime smoke: Ubuntu/Python 3.12 only, selected for code changes.
-- High-risk PR offline: full existing regressions on the same single lane, no coverage.
-- High-risk PR integration: Python 3.14/CUBRID 11.4; targeted extra lanes.
-- main and changed-weekly: one full offline coverage lane, oldest/newest live endpoints.
+- PR runtime smoke: a single Python cell, selected for code changes.
+- High-risk PR offline and integration: full existing regressions on the oldest and
+  newest supported Python, plus targeted live lanes.
+- main, changed-weekly and dispatch: full offline suite with coverage on the oldest and
+  newest supported Python, live Python 3.14/CUBRID 11.4 and 3.11/CUBRID 10.2.
 - Full integration: manual and every release; no automatic nightly full matrix.
-- Details, change classification and gate requirements: [CI policy](docs/CI_POLICY.md).
+- Exact Python/CUBRID versions, change classification and gate requirements live in
+  the [CI policy](docs/CI_POLICY.md) and the workflow files; do not copy them here.
 
 ## Test Structure
 
@@ -520,39 +610,26 @@ Ultraworked with [Sisyphus](https://github.com/code-yeongyu/oh-my-opencode)
 Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 ```
 
-## Project Context — Performance Loop System
+## Performance and Roadmap Pointers
 
-> This repo is the **primary optimization target** of the Performance Loop.
-> Board: [CUBRID Ecosystem Roadmap](https://github.com/orgs/cubrid-lab/projects/2)
+Performance work is tracked in issues, not in this file. Before treating any
+performance or roadmap item as current priority, check the live sources:
 
-### Role
+- [ROADMAP.md](ROADMAP.md) — public roadmap and current project baseline (the
+  linked org project board may require cubrid-lab membership).
+- [docs/PERFORMANCE.md](docs/PERFORMANCE.md) — benchmark methodology, regression
+  checks, profiling scripts, timing hooks and how to reproduce a measurement.
+- [cubrid-benchmark](https://github.com/cubrid-lab/cubrid-benchmark) — the
+  benchmark harness and its published results. Its 2026-03 results are historical
+  (pycubrid 0.5.0) and compare database engines; do not use them as a target.
 
-pycubrid's 4.5-6× performance gap vs PyMySQL is the biggest measurable improvement opportunity.
-The hero metric is **reducing this gap with documented before/after numbers**.
+Performance goals are driver-focused and measured on the same CUBRID server:
 
-### Related Issues
+- **Release-to-release regression** — the current pycubrid release must not be
+  slower than the previous release on the same workload.
+- **Overhead vs the official `CUBRIDdb` driver** — measure and reduce the gap
+  between pycubrid and `CUBRIDdb` against the same server.
 
-| Issue | Phase | Priority |
-|-------|-------|----------|
-| #19 cProfile/line_profiler hot path analysis | R2 | Must-Have |
-| #20 Optimize serialization path (protocol.py/packet.py) | R2 | Must-Have |
-| #21 Optimize cursor fetch performance | R2 | Must-Have |
-| #22 Second optimization cycle (connection reuse, batch) | R3 | Must-Have |
-| #14 Performance investigation template | R2 | Must-Have |
-| #15 Add lightweight perf microbenchmarks | R2 | Must-Have |
-| #16 Expose optional driver-level timing hooks | R2 | Nice-to-Have |
-
-### Decision Gate (Week 8)
-
-If combined improvements from #20 + #21 achieve < +10%, pivot narrative
-from "major speedup" to "public regression-prevention loop with verified targeted gains."
-
-### Current Performance Gap (baseline)
-
-| Operation | CUBRID/MySQL Ratio | Notes |
-|-----------|-------------------|-------|
-| insert | 6.0× | Heaviest gap |
-| select_by_pk | 4.5× | |
-| full_scan | 5.5× | |
-| update | 4.9× | |
-| delete | 5.1× | |
+Do not use a comparison with another database engine or its driver as a
+performance goal. Do not copy benchmark ratios, phase plans or issue tables into
+this file.

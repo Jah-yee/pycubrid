@@ -12,9 +12,17 @@ from typing import cast
 
 import pytest
 
+from pycubrid._cursor_common import _CDecimal
 from pycubrid.exceptions import DataError, ProgrammingError
 
 _INJECTED = "1; DROP TABLE t"
+
+# Decimal subclasses render by value only with the C decimal module; without it
+# (a Python built without libmpdec, such as the actions/setup-python 3.15.0
+# build) pycubrid refuses them, which TestPureDecimalFallback covers.
+requires_c_decimal = pytest.mark.skipif(
+    _CDecimal is None, reason="Decimal subclass parameters need the C decimal module"
+)
 
 
 class _Color(enum.IntEnum):
@@ -345,8 +353,8 @@ class TestFormatParameterTypes:
             (_HostileInt(-(10**40)), "-1" + "0" * 40),
             (_HostileFloat(2.5), "2.5"),
             (_HostileFloat(1e20), "1e+20"),
-            (_HostileDecimal("1E-7"), "0.0000001"),
-            (_HostileDecimal("-1.10"), "-1.10"),
+            pytest.param(_HostileDecimal("1E-7"), "0.0000001", marks=requires_c_decimal),
+            pytest.param(_HostileDecimal("-1.10"), "-1.10", marks=requires_c_decimal),
         ],
         ids=[
             "IntEnum",
@@ -372,10 +380,12 @@ class TestFormatParameterTypes:
         with pytest.raises(ProgrammingError, match="nan and inf"):
             cursor._format_parameter(_HostileFloat("nan"))
 
+    @requires_c_decimal
     def test_decimal_subclass_nan_raises(self, cursor: object) -> None:
         with pytest.raises(ProgrammingError, match="nan and inf"):
             cursor._format_parameter(_HostileDecimal("NaN"))
 
+    @requires_c_decimal
     def test_decimal_subclass_precision_check_uses_value(self, cursor: object) -> None:
         # A lying as_tuple() override must not bypass the 38-digit check.
         with pytest.raises(DataError, match="at most 38 digits"):
@@ -1045,8 +1055,152 @@ class TestPureDecimalFallback:
         # A plain pure-Python Decimal still renders.
         assert _cursor_common.format_parameter(_pydecimal.Decimal("1E-7")) == "0.0000001"
 
+    @requires_c_decimal
     def test_c_decimal_subclass_is_forge_proof(self) -> None:
         from pycubrid._cursor_common import format_parameter
 
         forged = self._forging_subclass(Decimal)("1.5")
         assert format_parameter(forged) == "1.5"
+
+    @pytest.mark.skipif(_CDecimal is not None, reason="the C decimal module is available")
+    def test_subclass_rejected_on_a_python_without_c_decimal(self) -> None:
+        # The real environment, not a monkeypatch: the interpreter has no _decimal.
+        from pycubrid._cursor_common import format_parameter
+
+        with pytest.raises(ProgrammingError, match="require the C decimal module"):
+            format_parameter(_HostileDecimal("1.5"))
+        assert format_parameter(Decimal("1.5")) == "1.5"
+
+
+class _RepeatedHourTZ(datetime.tzinfo):
+    """A keyed zone whose every wall time repeats: fold=0 is -04:00, fold=1 -05:00."""
+
+    key = "America/New_York"
+
+    def __init__(self, names: tuple[object, object] = ("EDT", "EST")) -> None:
+        self._names = names
+
+    def utcoffset(self, dt: datetime.datetime | None) -> datetime.timedelta | None:
+        assert dt is not None
+        return datetime.timedelta(hours=-5 if dt.fold else -4)
+
+    def dst(self, dt: datetime.datetime | None) -> datetime.timedelta:
+        return datetime.timedelta(0)
+
+    def tzname(self, dt: datetime.datetime | None) -> str:
+        assert dt is not None
+        return cast(str, self._names[dt.fold])
+
+
+class TestRepeatedWallTime:
+    """#819: the second occurrence of a repeated wall time keeps its instant."""
+
+    @pytest.mark.parametrize(
+        ("zone", "wall", "fold", "expected"),
+        [
+            # fold=0 keeps the region alone, which CUBRID resolves to the first
+            # occurrence.
+            ("America/New_York", (2026, 11, 1, 1, 30), 0, "America/New_York"),
+            ("America/New_York", (2026, 11, 1, 1, 30), 1, "America/New_York EST"),
+            ("Europe/Dublin", (2026, 10, 25, 1, 30), 0, "Europe/Dublin"),
+            ("Europe/Dublin", (2026, 10, 25, 1, 30), 1, "Europe/Dublin GMT"),
+            # Numeric abbreviations are not sent: the offset names the instant.
+            ("America/Santiago", (2026, 4, 4, 23, 30), 0, "America/Santiago"),
+            ("America/Santiago", (2026, 4, 4, 23, 30), 1, "-04:00"),
+            # Both occurrences share "MSK": the offset names the instant.
+            ("Europe/Moscow", (2014, 10, 26, 1, 30), 0, "Europe/Moscow"),
+            ("Europe/Moscow", (2014, 10, 26, 1, 30), 1, "+03:00"),
+        ],
+    )
+    def test_repeated_wall_time_names_occurrence(
+        self, zone: str, wall: tuple[int, ...], fold: int, expected: str
+    ) -> None:
+        from zoneinfo import ZoneInfo
+
+        from pycubrid._cursor_common import format_parameter
+
+        value = datetime.datetime(*wall, fold=fold, tzinfo=ZoneInfo(zone))
+        stamp = "%04d-%02d-%02d %02d:%02d:00.000" % wall
+        assert format_parameter(value) == "DATETIMETZ'%s %s'" % (stamp, expected)
+
+    @pytest.mark.parametrize("fold", [0, 1])
+    @pytest.mark.parametrize(
+        ("wall", "stamp"),
+        [
+            ((2026, 7, 1, 1, 30), "2026-07-01 01:30:00.000"),
+            ((2026, 11, 1, 2, 30), "2026-11-01 02:30:00.000"),
+            # Skipped wall time (spring forward): unchanged, CUBRID rejects it.
+            ((2026, 3, 8, 2, 30), "2026-03-08 02:30:00.000"),
+        ],
+        ids=["summer", "after-fold", "gap"],
+    )
+    def test_unambiguous_wall_time_is_region_only(
+        self, wall: tuple[int, ...], stamp: str, fold: int
+    ) -> None:
+        from zoneinfo import ZoneInfo
+
+        from pycubrid._cursor_common import format_parameter
+
+        value = datetime.datetime(*wall, fold=fold, tzinfo=ZoneInfo("America/New_York"))
+        assert format_parameter(value) == "DATETIMETZ'%s America/New_York'" % stamp
+
+    @pytest.mark.parametrize("fold", [0, 1])
+    def test_fixed_offset_ignores_fold(self, fold: int) -> None:
+        from pycubrid._cursor_common import format_parameter
+
+        tz = datetime.timezone(datetime.timedelta(hours=-5))
+        value = datetime.datetime(2026, 11, 1, 1, 30, fold=fold, tzinfo=tz)
+        assert format_parameter(value) == "DATETIMETZ'2026-11-01 01:30:00.000 -05:00'"
+
+    @pytest.mark.parametrize(
+        "name",
+        ["EST' ; DROP TABLE users; --", "EST'", "EST\n", "E ST", "ÉST", "-05", _HostileStr("EST")],
+        ids=[
+            "quote-injection",
+            "quote",
+            "newline",
+            "space",
+            "non-ascii",
+            "numeric",
+            "str-subclass",
+        ],
+    )
+    def test_hostile_tzname_never_reaches_sql(self, name: object) -> None:
+        from pycubrid._cursor_common import format_parameter
+
+        value = datetime.datetime(2026, 11, 1, 1, 30, fold=1, tzinfo=_RepeatedHourTZ(("EDT", name)))
+        assert format_parameter(value) == "DATETIMETZ'2026-11-01 01:30:00.000 -05:00'"
+
+    def test_non_str_tzname_is_rejected(self) -> None:
+        from pycubrid._cursor_common import format_parameter
+
+        value = datetime.datetime(2026, 11, 1, 1, 30, fold=1, tzinfo=_RepeatedHourTZ(("EDT", 42)))
+        with pytest.raises(ProgrammingError, match="invalid tzinfo"):
+            format_parameter(value)
+
+    def test_tzname_callback_error_has_fixed_message(self) -> None:
+        from pycubrid._cursor_common import format_parameter
+
+        error = _UnprintableTZError()
+
+        class FailingName(_RepeatedHourTZ):
+            def tzname(self, dt: datetime.datetime | None) -> str:
+                raise error
+
+        value = datetime.datetime(2026, 11, 1, 1, 30, fold=1, tzinfo=FailingName())
+        with pytest.raises(ProgrammingError) as caught:
+            format_parameter(value)
+        assert str(caught.value) == "invalid tzinfo on datetime parameter"
+        assert caught.value.__cause__ is error
+
+    def test_offset_missing_for_other_fold_is_rejected(self) -> None:
+        from pycubrid._cursor_common import format_parameter
+
+        class HalfOffset(_RepeatedHourTZ):
+            def utcoffset(self, dt: datetime.datetime | None) -> datetime.timedelta | None:
+                assert dt is not None
+                return None if dt.fold else datetime.timedelta(hours=-4)
+
+        value = datetime.datetime(2026, 11, 1, 1, 30, tzinfo=HalfOffset())
+        with pytest.raises(ProgrammingError, match="invalid tzinfo"):
+            format_parameter(value)

@@ -244,17 +244,18 @@ sqlalchemy-cubrid와 함께 사용할 때 ORM, Core, Alembic 마이그레이션,
 | [타입 매핑](TYPES.md) | 전체 타입 매핑, CUBRID 전용 타입, 컬렉션 타입 |
 | [API 레퍼런스](API_REFERENCE.md) | 전체 API 문서 — 모듈, 클래스, 함수 |
 | [프로토콜](PROTOCOL.md) | CAS 와이어 프로토콜 레퍼런스 |
-| [성능 가이드](ko/PERFORMANCE.md) | 벤치마크 결과, 최적화 팁, 성능 조사와 타이밍 훅 |
+| [성능 가이드](ko/PERFORMANCE.md) | 벤치마크 방법론, 회귀 확인, 프로파일링, 타이밍 훅 |
 | [개발 가이드](DEVELOPMENT.md) | 개발 환경 설정, 테스트, Docker, 커버리지, CI/CD |
 | [예제](EXAMPLES.md) | 실용적인 사용 예제와 코드 |
 | [문제 해결](TROUBLESHOOTING.md) | 연결 오류, 쿼리 문제, LOB 처리, 디버깅 |
 
 ## 호환성
 
-Python 3.11–3.14와 CUBRID 10.2, 11.0, 11.2, 11.4를 지원합니다.
+Python 3.11–3.15와 CUBRID 10.2, 11.0, 11.2, 11.4를 지원합니다.
 일반 PR은 Ubuntu/Python 3.12 대표 오프라인 스모크 검사만 실행하고,
 고위험 변경은 Python 3.14/CUBRID 11.4 통합 검사를 추가합니다.
-main 및 변경이 있는 주간 검사는 최저·최신 대표 조합을 사용합니다.
+main 및 변경이 있는 주간 검사는 Python 3.11/CUBRID 10.2 통합 검사와
+Python 3.11·3.15 전체 오프라인 검사를 추가합니다.
 전체 5 × 4 통합 매트릭스는 명시적 수동 실행과 릴리즈에서 유지합니다.
 [CI 실행 정책](ko/CI_POLICY.md)을 참고하세요.
 
@@ -323,7 +324,7 @@ conn = pycubrid.connect(host="localhost", port=33000, database="testdb", user="d
 
 ### 어떤 Python 버전을 지원하나요?
 
-Python 3.11, 3.12, 3.13, 3.14를 지원합니다.
+Python 3.11, 3.12, 3.13, 3.14, 3.15(표준 GIL 빌드)를 지원합니다.
 
 ### pycubrid는 LOB(CLOB/BLOB)를 지원하나요?
 
@@ -372,7 +373,7 @@ CUBRID가 처음이신가요? 작업하려는 내용에 맞는 저장소를 선�
 
 ## 보안
 
-취약점은 이메일로 제보해 주세요 — 자세한 내용은 [SECURITY.md](../SECURITY.md)를 참고하세요. 보안 관련 사항은 공개 이슈로 등록하지 마세요.
+취약점은 GitHub의 비공개 취약점 제보(private vulnerability reporting)로 제보해 주세요(대체 수단은 이메일) — 자세한 내용은 [SECURITY.md](../SECURITY.md)를 참고하세요. 보안 관련 사항은 공개 이슈로 등록하지 마세요.
 
 ## 감사의 말
 

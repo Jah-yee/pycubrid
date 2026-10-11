@@ -29,7 +29,7 @@ Everything you need to set up, test, and contribute to pycubrid.
 
 | Requirement   | Version  | Notes |
 |---------------|----------|-------|
-| Python        | 3.10+    | Uses `X | Y` union syntax, `match` statements |
+| Python        | 3.11+    | Matches `requires-python` in `pyproject.toml` |
 | Docker        | Latest   | Only for integration tests |
 | CUBRID Server | 10.2–11.4 | Via Docker or local install |
 
@@ -42,8 +42,8 @@ Everything you need to set up, test, and contribute to pycubrid.
 git clone https://github.com/cubrid-lab/pycubrid.git
 cd pycubrid
 
-# Install in development mode with dev dependencies
-pip install -e ".[dev]"
+# Install in development mode with the dev dependency group (pip 25.1+)
+pip install -e . --group dev
 
 # Or use the Makefile
 make install
@@ -307,9 +307,13 @@ lifecycle, LOB I/O) is configured under `[tool.mutmut]` in `pyproject.toml`, run
 against the offline suite:
 
 ```bash
-pip install -e ".[dev,mutation]"
+pip install -e . --group dev --group mutation
 make mutation          # mutmut run && mutmut results
 ```
+
+`make mutation` needs Python 3.12 or newer and stops with a message on 3.11:
+mutmut 3.8 fails at stats collection there (#812). CI's weekly mutation job
+uses 3.12.
 
 Focus on meaningful surviving mutants (a flipped comparison or dropped cleanup
 that no test kills), not the raw score.
@@ -334,7 +338,7 @@ TLS tests need an SSL-enabled broker; see
 [Async TLS integration tests](#async-tls-integration-tests).
 
 
-`make integration` and `make integration-tls` clean up containers after success, readiness failure or test failure, while preserving existing Docker volumes. Explicit `make docker-down` uses `down -v` and removes volumes. Use `make integration-local` to test an existing broker without managing Docker.
+`make integration` and `make integration-tls` clean up containers after success, readiness failure or test failure, while preserving existing Docker volumes. Explicit `make docker-down` uses `down -v` and removes volumes. Use `make integration-local` to test an existing broker without managing Docker. Cleanup also runs on SIGINT and SIGTERM, except that a `make integration` started as a background job (`&`) of a non-interactive shell ignores SIGINT, per POSIX, while SIGTERM still runs cleanup.
 
 **Enabling integration vs. choosing the endpoint.** Integration tests are
 *enabled* when `CUBRID_TEST_URL` or `CUBRID_TEST_HOST` is set to a non-empty
@@ -446,7 +450,7 @@ pytest tests/ -m "integration and tls" -v
 
 You do not need to run the steps above locally for routine development —
 `.github/workflows/integration-full.yml` includes an `integration-tls` job
-(Python {3.10, 3.14} × CUBRID 11.4) that:
+(Python {3.11, 3.14, 3.15} × CUBRID 11.4) that:
 
 1. Starts a CUBRID 11.4 container manually (so the broker config can be
    patched after the container is up).
@@ -582,16 +586,16 @@ Make and regular/maintenance CI share the `LINT_PATHS` list in `Makefile`:
 `pycubrid tests scripts demos examples`. Ruff CLI discovery and hook types are explicitly
 Python/pyi-only; Markdown is outside this formatting contract. Hooks use the same maintained-file scope;
 Mypy remains strict and package-only. The tools run through the active Python
-environment, so install `.[dev]` and activate it before running checks.
+environment, so install the `dev` dependency group and activate it before running checks.
 
-`pyproject.toml` owns the exact Ruff/Mypy versions. The Ruff and Mypy pre-commit
+The `lint` dependency group in `pyproject.toml` owns the exact Ruff/Mypy versions. The Ruff and Mypy pre-commit
 hooks are `repo: local` / `language: system` hooks that invoke `python3 -m ruff`
 and `python3 -m mypy` against that same active environment, so there is no
-separate hook revision to keep in sync: bumping the dev pin (Dependabot's `pip`
-ecosystem does exactly this) and reinstalling `.[dev]` is enough. Activate that
+separate hook revision to keep in sync: bumping the `lint` group pin (Dependabot's `pip`
+ecosystem does exactly this) and reinstalling the `dev` group is enough. Activate that
 environment (or a venv where it's installed) whenever a commit should run the
 hooks; otherwise Ruff/Mypy are missing or a stale/global version silently runs
-instead of the pinned one. Update the dev pin, reinstall `.[dev]`, and run
+instead of the pinned one. Update the `lint` group pin, reinstall the `dev` group, and run
 `make check-all` plus `pre-commit run --all-files`. `make tooling-check` rejects
 pin, installed-version, hook-scope, and CI-scope drift before
 lint/format/typecheck.
@@ -733,7 +737,47 @@ available targets and asks for the password separately. Without JUnit, an accept
 caller-supplied legacy target remains a hint, not a verified report identity. Known configured
 passwords, decoded/encoded URL-password variants and recognized credential-bearing URLs
 are redacted before each failure record's message/detail is limited to 64 KiB
-of UTF-8 bytes. This does not guarantee sanitizing arbitrary secrets or data.
+of UTF-8 bytes. A valid `CUBRID_TEST_URL` of up to 2048 characters is recorded
+as `user:***@host:port`. It is recorded as `<unparseable-url-redacted>` when `urllib`
+cannot parse it, when any `@` lies outside the authority `urllib` parsed (for
+example `u:pw@host/db` or `cubrid:u:pw@host/db` without `://`, or a password
+containing `/`, `?`, `#` or `@`), or when it is longer than 2048 characters.
+For such a URL, or one containing a tab, CR or LF (which `urllib` strips), the
+text after each `:` before each `@`, and each piece and suffix of that text split
+at `/`, `?`, `#` and `@` that is at least 3 characters long, is redacted raw and
+percent-encoded/decoded in free text. Within the first 2048 characters, the text
+after the first and the last `:` before the first `@`, and each piece (not each
+suffix) of the userinfo up to the last `@`, are always candidates. Each URL-derived candidate is also
+redacted as written (not percent-encoded) with CR and CRLF turned into LF (as
+an XML parser reads element text), with tabs, CRs and LFs removed (as `urllib`
+strips them) and `repr()`-escaped (as a traceback quotes it). A lowercased form of 3 or more characters is
+redacted only as a whole word, the way `urllib` puts a lowercased host into
+resolver and test-gate text (`dba@***:33000/testdb`). So is each host-shaped
+piece of a candidate (split at `/`, `?`, `#`, `@`, `%`, `[` and `]`, without a
+trailing `:port`) of 3 or more characters, because `urllib` rewrites the port,
+drops IPv6 brackets and lowercases only the part before a `%zone`
+(`dba@***%Ab12:33000`). These derived fragments
+may over-redact unrelated diagnostic text; shorter derived fragments are not
+redacted (#777). A URL longer than 2048 characters, or one that would yield more
+than 1024 candidate fragments or 8192 candidate characters, keeps the candidates
+found in its first 2048 characters before that limit and is also redacted as a
+whole string, together with the password `urllib` parses from it and any
+`scheme://user:password@` password it contains. `CUBRID_TEST_PASSWORD` is
+matched exactly, raw and percent-encoded, without these variants. Both limits
+are a hard cap: they are checked before each candidate is added, so enumeration
+stops at the limit even inside a single long tail. A password
+fragment lowercased inside a longer word, or transformed in any other way, is
+not guaranteed to be redacted. The endpoint resolver is
+not trusted for a URL recorded as `<unparseable-url-redacted>`, because `urllib`
+may place password fragments in the host (lowercased), user or database: its
+replay command and server identity are then recorded as unavailable. Endpoint
+fields and the readiness endpoint are rejected when they contain a known
+password case-insensitively. A JDBC-style URL without `@`
+(`jdbc:cubrid:host:33000:db:u:PW:`) is not recognised as credential-bearing:
+its password is recorded as written unless it is also set in
+`CUBRID_TEST_PASSWORD`. Endpoint-resolution errors are reported as a fixed
+message, never as resolver text. This does not guarantee sanitizing arbitrary
+secrets or data.
 
 Optional readiness `--server-info PATH` records the actual engine version or
 an `unavailable` reason. The workflow uses a fresh run-ID/run-attempt path
@@ -843,113 +887,36 @@ assets; pinning its caller is not a complete freeze of those assets.
 
 ### CI Matrix
 
-Routine CI uses one Ubuntu/Python 3.12 offline lane and representative live
-combinations rather than the full matrix. PRs run smoke tests; main and changed
-weekly runs retain the full offline suite with 95% coverage. High-risk PRs run the full existing offline regressions without coverage on that
-same lane and select newest integration, while main/weekly use oldest/newest endpoints. Repository
+Routine CI uses representative offline and live combinations rather than the
+full matrix. Ordinary PRs run offline smoke tests on Ubuntu/Python 3.12.
+High-risk PRs run the full existing offline regressions without coverage on the
+oldest and newest supported Python (3.11 and 3.15) and select Python
+3.14/CUBRID 11.4 integration. main, changed weekly runs and manual dispatches run
+the full offline suite with 95% coverage on Python 3.11 and 3.15 and add Python
+3.11/CUBRID 10.2 integration. Repository
 tooling is path-selected on one Linux lane. Full integration is explicit/manual
 and release-only. See [CI execution policy](CI_POLICY.md) for exact selection and
-validation requirements. Historical cost measurements below describe the earlier
-workflow, not current job counts or new savings.
+validation requirements.
 
-### PR verification cost (#564)
+### PR verification cost
 
-Measured from real `ci.yml` runs (GitHub REST `/actions/runs/{id}/timing`
-`run_duration_ms`, and job-step `started_at`/`completed_at`), not estimates.
-The ordinary run object omits `run_duration_ms`; the `/timing` endpoint
-provides it. Baseline code PR:
-[run 36929613502](https://github.com/cubrid-lab/pycubrid/actions/runs/36929613502),
-2026-10-01, 306s (5m06s), with all integration paths selected. A separate
-docs-only example, [PR #587](https://github.com/cubrid-lab/pycubrid/pull/587)
-(`RELEASING.md` only), took 419s in
-[run 36865409050](https://github.com/cubrid-lab/pycubrid/actions/runs/36865409050):
-all four code/TLS-gated integration jobs skipped and doc-lint passed. Its
-`detect-changes` job did not start until about three minutes after the workflow,
-so that elapsed time mainly illustrates queue variance, not a cache comparison.
+Current CI cost evidence lives in [CI execution policy](CI_POLICY.md#event-tiers-and-cost-evidence):
+runner minutes, job counts and failure yield per event tier, with reproducible
+definitions, plus the coverage-ownership table (#750, #781). Use those numbers,
+not older ones, when you reason about CI cost.
 
-| Job group | Jobs | Wall time (longest job) | Notes |
-|---|---|---|---|
-| `offline-tests` matrix | 10 (2 OS × 5 Python) | 78s–124s | Editable dev installs took 11–23s; macOS was 9–51% slower than Linux by Python version in this one run, not a stable ratio. |
-| `integration-tests` / `integration-charset` / `integration-tls` / `official-differential` | 5 jobs, 6 CUBRID containers | 65s–118s | Service-container initialization took 15–41s where present; TLS starts Docker inside its own step. Editable dev installs took 17–22s. |
-| `repo-tooling-tests` matrix | 2 (ubuntu, macos) | 32s–51s | Editable dev installs took 14–15s. |
-| `lint` / `typecheck` / `compat-check` / `packaging-smoke-test` | 4 | 9s–24s | Lint/typecheck install dev tools; compat installs the package only (3s), packaging installs `build` (2s). |
-| `doc-lint` (reusable) | path-gated on docs changes | 2s–8s per sub-step | Skips entirely when no Markdown/`docs/**` changed. |
+The earlier #564 baseline (2026-10-01) measured a workflow that no longer exists:
+a 2 OS × 5 Python offline matrix including Python 3.10, with pip caching. It is kept
+in [#564](https://github.com/cubrid-lab/pycubrid/issues/564) and in this file's git
+history. Two of its outcomes still apply:
 
-In this baseline run, the `needs:` graph had parallel roots: `detect-changes`,
-the offline matrix, lint, typecheck, repository tooling and compat-check, and
-offline jobs started *before* `detect-changes` finished. Packaging waited for all
-offline cells, and the container-based jobs then waited for packaging, offline,
-lint, typecheck and `detect-changes`. The live lanes now start right after
-`validate-target` and `detect-changes`, alongside the static and offline jobs
-(see [Parallel live lanes](CI_POLICY.md#parallel-live-lanes)); `ci-gate` still
-waits for every result.
-Queue time and the slowest prerequisite branch also affect workflow elapsed
-time; a simple sum of job durations is not the critical path.
+- `scripts/wait_for_cubrid.py` selects code-gated integration
+  (`tests/test_workflow_path_impact.py`).
+- A repository-tooling test runs the `CI Gate` against synthetic failed and
+  cancelled results.
 
-**Fixable setup cost**: the baseline expanded to 21 jobs using
-`actions/setup-python`; 19 performed an editable dev install, while compat
-installed `-e .` and packaging installed `build`. Each job still needs its
-own install. The new `cache: pip` input caches pip's global download cache,
-**not** the installed environment. Its key includes OS, Python version and
-the dependency-file hash: matching OS/Python jobs can reuse downloads once a
-cache is saved, including on later runs, but distinct matrix cells do not
-share a single cache. Concurrent first-run jobs can all miss. See the
-[setup-python caching guide](https://github.com/actions/setup-python#caching-packages-dependencies).
-The first changed-head run had a pip cache miss for Ubuntu/Python 3.10 and
-saved the cache afterward; it took 328s versus the 306s baseline. That cold
-run does **not** demonstrate an overall speedup. Docker startup is also a
-substantial cost and remains unchanged here.
-
-**Path-filter trigger audit**: spot-checked `detect-changes` outputs against
-actual job results across recent PR runs.
-[PR #597](https://github.com/cubrid-lab/pycubrid/pull/597), which fixes
-[issue #595](https://github.com/cubrid-lab/pycubrid/issues/595) without
-touching TLS paths, produced a `skipped` `integration-tls` job in
-[run 36879861578](https://github.com/cubrid-lab/pycubrid/actions/runs/36879861578),
-while both regular integration cells, charset and official differential
-passed. Docs-only [PR #587](https://github.com/cubrid-lab/pycubrid/pull/587)
-skipped all four code/TLS-gated integration jobs as intended. The unchanged
-`ci-gate` accepts `skipped` only for these path-gated jobs, not a failed or
-cancelled one.
-The audit found one real gap: `scripts/wait_for_cubrid.py` is invoked by
-every container-based job (`integration-tests`, `integration-charset`,
-`official-differential`) but was missing from the `code:` filter list, so a
-PR touching only that script would have skipped all code-gated integration
-coverage before merge. Added to `code:` and locked by a repository-tooling
-test, so this only *adds* coverage and cannot produce a new skip.
-
-The failure gate also has real evidence: in
-[run 36776514307](https://github.com/cubrid-lab/pycubrid/actions/runs/36776514307),
-a claimed official behavior comparison failed and the `CI Gate` failed.
-A repository-tooling test now executes the unchanged gate shell with synthetic
-`failure`/`cancelled` official and integration results; each exits nonzero,
-while expected docs-only skips pass. Neither the official comparison nor the
-gate was weakened.
-
-**Changes made** (both additive/safe; no job removed, no coverage reduced, no
-required check or branch-protection context touched, `ci-gate`'s
-pass/fail logic for skipped vs. failed/cancelled required jobs is unchanged):
-
-1. `cache: pip` + `cache-dependency-path: pyproject.toml` added to every
-   `actions/setup-python` step in `ci.yml` (10 YAML steps, 21 expanded jobs).
-   Jobs with a matching OS/Python/cache key can reuse downloaded wheels once
-   an earlier job or run has saved them; the editable install still runs.
-2. `scripts/wait_for_cubrid.py` added to the `code:` path filter (closes the
-   gap above).
-
-**After**: this PR's first changed-head run,
-[36932083505 attempt 1](https://github.com/cubrid-lab/pycubrid/actions/runs/36932083505),
-missed the Ubuntu/Python 3.10 pip cache and saved it afterward. Its elapsed
-time was about 328s, *longer* than the 306s baseline. One rerun of the
-same head (attempt 2) logged a cache hit and successful restore for that
-OS/Python key and finished in 295s by `/timing`: 11s (about 3.6%) below
-the baseline and about 33s below its cold attempt. Across the same 19
-editable-dev install steps, the sum of per-job durations was 321s baseline,
-275s cold and 266s warm. Those jobs overlap, so their sum is **not**
-wall-clock time saved; individual installs varied (the warm lint install
-was slower). The observed result supports a modest, targeted setup gain,
-not a guaranteed per-PR speedup or proof that the cache alone caused the
-workflow-level difference. Runner queue and Docker startup also varied.
+Dependency installation has since moved to uv
+([Dependency installation](CI_POLICY.md#dependency-installation)).
 
 ---
 
@@ -1057,4 +1024,11 @@ automatically. Nobody pushes tags or publishes by hand.
 
 ## Changelog validation
 
-`python scripts/lint_changelog.py` rejects repeated subsection headings within a release, including an Unreleased-only file. Different releases may reuse the same subsection names.
+`python scripts/lint_changelog.py` rejects repeated subsection headings within a release, including an Unreleased-only file, but like the section policy only in `[Unreleased]` and releases after 1.10.0: released history up to 1.10.0 is never rewritten. Different releases may reuse the same subsection names. Fenced code blocks follow one rule in `scripts/lint_changelog.py` and `scripts/compose_release_changelog.py`: a fenced `###` line is entry content, never a heading; a fenced `## [` release header is an error (`scripts/extract_release_notes.py` is not fence-aware and would truncate the Release body); an unclosed fence is an error. Only fences that start at column 0 with three backticks are recognised, not tilde or indented/nested fences. Both scripts are shared with sqlalchemy-cubrid, cubrid-mcp-server and the cookbook; once all four repositories adopt the rule-5 cutoff gating, only `SECTION_POLICY_CUTOFF` differs.
+
+In `[Unreleased]` and in releases after 1.10.0 it also requires the standard `###`
+sections, each with content, in this order: Upgrade notes, Added, Changed, Deprecated,
+Removed, Fixed, Security, Performance, Documentation, CI, Tests. Use `Documentation`, not
+`Docs`, and file release automation under `CI` or `Changed`. Releases up to 1.10.0 keep
+their historical headings. The GitHub Release body is the CHANGELOG section plus one
+`**Full Changelog**` compare link; see the "GitHub Release Policy" in `AGENTS.md`.

@@ -31,7 +31,7 @@ pycubrid를 설정·테스트·기여하는 데 필요한 모든 것.
 
 | 요구사항      | 버전    | 비고 |
 |---------------|---------|------|
-| Python        | 3.10+   | `X \| Y` 유니언 구문, `match` 문 사용 |
+| Python        | 3.11+   | `pyproject.toml`의 `requires-python`과 동일 |
 | Docker        | 최신    | 통합 테스트에만 필요 |
 | CUBRID Server | 10.2–11.4 | Docker 또는 로컬 설치 |
 
@@ -44,8 +44,8 @@ pycubrid를 설정·테스트·기여하는 데 필요한 모든 것.
 git clone https://github.com/cubrid-lab/pycubrid.git
 cd pycubrid
 
-# dev 의존성과 함께 개발 모드로 설치
-pip install -e ".[dev]"
+# dev 의존성 그룹과 함께 개발 모드로 설치(pip 25.1 이상)
+pip install -e . --group dev
 
 # 또는 Makefile 사용
 make install
@@ -295,9 +295,13 @@ CAS 세션으로 보냈습니다. 이제 `COMMIT` 전에 새 값을 기록하므
 설정되어 있으며 오프라인 스위트를 대상으로 실행합니다:
 
 ```bash
-pip install -e ".[dev,mutation]"
+pip install -e . --group dev --group mutation
 make mutation          # mutmut run && mutmut results
 ```
+
+`make mutation`은 Python 3.12 이상이 필요하며 3.11에서는 메시지와 함께 멈춥니다.
+mutmut 3.8이 3.11에서 통계 수집 단계에 실패하기 때문입니다(#812). CI의 주간
+뮤테이션 작업은 3.12를 사용합니다.
 
 단순 점수가 아니라 의미 있는 생존 변이(어떤 테스트도 잡지 못한 뒤집힌 비교나
 빠진 정리 코드)에 집중하세요.
@@ -322,7 +326,7 @@ TLS 테스트는 SSL이 켜진 브로커가 필요합니다.
 [비동기 TLS 통합 테스트](#비동기-tls-통합-테스트)를 참고하세요.
 
 
-`make integration`과 `make integration-tls`는 성공·준비 실패·테스트 실패 후 컨테이너를 정리하지만 기존 Docker 볼륨을 보존합니다. 명시적 `make docker-down`은 `down -v`로 볼륨을 삭제합니다. 기존 브로커를 유지하며 테스트하려면 Docker를 관리하지 않는 `make integration-local`을 사용하세요.
+`make integration`과 `make integration-tls`는 성공·준비 실패·테스트 실패 후 컨테이너를 정리하지만 기존 Docker 볼륨을 보존합니다. 명시적 `make docker-down`은 `down -v`로 볼륨을 삭제합니다. 기존 브로커를 유지하며 테스트하려면 Docker를 관리하지 않는 `make integration-local`을 사용하세요. SIGINT와 SIGTERM에서도 정리가 실행되지만, 비대화형 셸의 백그라운드 작업(`&`)으로 시작한 `make integration`은 POSIX에 따라 SIGINT를 무시하며 SIGTERM에서는 여전히 정리가 실행됩니다.
 
 **통합 테스트 활성화와 엔드포인트 선택의 구분.** 통합 테스트는
 `CUBRID_TEST_URL` 또는 `CUBRID_TEST_HOST`가 비어 있지 않은 값으로 설정되면
@@ -413,7 +417,7 @@ pytest tests/ -m "integration and tls" -v
 
 ##### CI의 자동화된 TLS 커버리지
 
-일상 개발에서 위 단계를 로컬로 실행할 필요는 없습니다 — `.github/workflows/integration-full.yml`에 다음을 수행하는 `integration-tls` 잡(Python {3.10, 3.14} × CUBRID 11.4)이 포함되어 있습니다:
+일상 개발에서 위 단계를 로컬로 실행할 필요는 없습니다 — `.github/workflows/integration-full.yml`에 다음을 수행하는 `integration-tls` 잡(Python {3.11, 3.14, 3.15} × CUBRID 11.4)이 포함되어 있습니다:
 
 1. CUBRID 11.4 컨테이너를 수동으로 시작 (컨테이너 기동 후 브로커 설정을 패치할 수 있도록).
 2. 새 자가 서명 인증서를 생성하고(`CN=localhost`, `SAN=DNS:localhost`), `cas_ssl_cert.{crt,key}`로 컨테이너에 주입한 뒤 `BROKER1`의 `SSL=OFF` → `SSL=ON`으로 전환하고 브로커를 재시작해 새 인증서가 반영되게 함.
@@ -538,16 +542,16 @@ Make와 일반/정기 CI는 `Makefile`의 `LINT_PATHS` 목록을 공유합니다
 `pycubrid tests scripts demos examples`. Ruff CLI와 훅은 명시적으로 Python/pyi만 검사하므로
 Markdown은 이 포맷 범위에 포함하지 않습니다. 훅에도 같은 관리 파일 범위를 적용하며,
 Mypy는 기존의 엄격한 패키지 전용 검사를 유지합니다. 검사는 현재 Python 환경의
-도구를 사용하므로 `.[dev]`를 설치하고 해당 환경을 활성화하세요.
+도구를 사용하므로 `dev` 의존성 그룹을 설치하고 해당 환경을 활성화하세요.
 
-Ruff/Mypy의 정확한 버전은 `pyproject.toml`에서 관리합니다. Ruff와 Mypy
+Ruff/Mypy의 정확한 버전은 `pyproject.toml`의 `lint` 의존성 그룹에서 관리합니다. Ruff와 Mypy
 pre-commit 훅은 `repo: local` / `language: system` 훅으로, 같은 활성 환경에서
 `python3 -m ruff`와 `python3 -m mypy`를 직접 호출합니다. 따라서 별도로 맞춰야 할
-훅 리비전이 없습니다: dev 핀을 올리고(Dependabot의 `pip` 생태계가 정확히 이
-작업을 수행합니다) `.[dev]`를 다시 설치하면 충분합니다. 커밋 시 훅이 실행되길
+훅 리비전이 없습니다: `lint` 그룹 핀을 올리고(Dependabot의 `pip` 생태계가 정확히 이
+작업을 수행합니다) `dev` 그룹을 다시 설치하면 충분합니다. 커밋 시 훅이 실행되길
 원한다면 그 환경(또는 이를 설치한 venv)을 항상 활성화해두세요. 그렇지 않으면
 Ruff/Mypy가 없거나, 고정된 버전 대신 오래되거나 전역에 설치된 버전이 조용히
-실행됩니다. dev 핀을 갱신하고 `.[dev]`를 다시 설치한 뒤 `make check-all` 및
+실행됩니다. `lint` 그룹 핀을 갱신하고 `dev` 그룹을 다시 설치한 뒤 `make check-all` 및
 `pre-commit run --all-files`를 실행하세요. `make tooling-check`는 린트/포맷/타입
 검사 전에 핀, 설치 버전, 훅 범위 및 CI 범위의 불일치를 실패 처리합니다.
 
@@ -659,7 +663,42 @@ CBRD / Correct Error 접수를 별도로 추적하며, 이 후속 작업에서�
 입력하도록 안내합니다. JUnit이 없을 때 허용되는 호출자의 기존 대상 정보는
 검증된 결과 식별자가 아닌 힌트로 남습니다. 알려진 설정 비밀번호, 디코딩·인코딩된 URL 비밀번호와
 인식하는 자격 증명 URL을 먼저 가린 뒤 실패 기록의 메시지·상세를 각각 UTF-8
-바이트 64 KiB로 제한합니다. 임의의 비밀이나 모든 데이터를 정화한다는 보장은 아닙니다.
+바이트 64 KiB로 제한합니다. 2048자 이하의 유효한 `CUBRID_TEST_URL`은
+`user:***@host:port` 형태로 기록합니다. `urllib`이 파싱하지 못하거나,
+`urllib`이 파싱한 authority 밖에 `@`가 있거나(예: `://`가 없는 `u:pw@host/db`나
+`cubrid:u:pw@host/db`, 또는 `/`, `?`, `#`, `@`를 포함한 비밀번호), 2048자를 넘으면
+`<unparseable-url-redacted>`로 기록합니다. 이런 URL이나 탭·CR·LF(`urllib`이
+제거함)를 포함한 URL은 각 `@` 앞의 각 `:` 뒤 텍스트와, 그 텍스트를 `/`, `?`,
+`#`, `@`에서 나눈 각 조각과 접미사 중 3자 이상인 것을 원본 및 퍼센트
+인코딩·디코딩 형태로 자유 텍스트에서 가립니다. 처음 2048자 안에서 첫 `@` 앞의
+첫 번째와 마지막 `:` 뒤 텍스트와, 마지막 `@`까지의 userinfo를 나눈 각
+조각(접미사는 제외)은 항상 후보입니다. URL에서 나온 각 후보는 퍼센트 인코딩 없이
+CR과 CRLF를 LF로 바꾼 형태(XML 파서가 요소 텍스트를 읽는 방식), 탭·CR·LF를
+제거한 형태(`urllib`이 제거하는 방식), `repr()`로 이스케이프한 형태(트레이스백이 인용하는 방식)로도
+가립니다. 3자 이상의 소문자 형태는 `urllib`이 소문자 호스트를 해석기와 테스트
+게이트 텍스트에 넣는 방식(`dba@***:33000/testdb`)처럼 온전한 단어로 나타날 때만
+가립니다. `urllib`은 포트를 다시 쓰고 IPv6 대괄호를 제거하며 `%zone` 앞 부분만
+소문자로 바꾸므로(`dba@***%Ab12:33000`), 후보를 `/`, `?`, `#`, `@`, `%`, `[`, `]`에서
+나누고 끝의 `:port`를 뺀 3자 이상의 호스트 형태 조각도 소문자 형태로 같은 방식으로
+가립니다. 이렇게 파생된 조각은 관련 없는 진단 텍스트까지 과하게 가릴 수 있으며,
+3자 미만의 파생 조각은 가리지 않습니다(#777). 2048자를 넘거나 후보 조각이
+1024개 또는 후보 문자가 8192자를 넘게 될 URL은 한도 전까지 처음 2048자에서 찾은
+후보를 유지하고, 전체 문자열과 함께 `urllib`이 파싱한 비밀번호와 URL 안의
+`scheme://user:password@` 형태 비밀번호도 가립니다. `CUBRID_TEST_PASSWORD`는
+이런 변형 없이 원본과 퍼센트 인코딩 형태로 정확히 일치할 때만 가립니다. 두 한도는
+각 후보를 추가하기 전에 확인하는 엄격한 상한이므로, 하나의 긴 꼬리 안에서도 한도에서
+열거를 멈춥니다. 더 긴
+단어 안에서 소문자로 바뀐 비밀번호 조각이나 다른 방식으로 변형된 비밀번호는 가린다고
+보장하지 않습니다.
+`<unparseable-url-redacted>`로 기록된 URL에는 엔드포인트 해석기를 신뢰하지
+않습니다. `urllib`이 비밀번호 조각을 호스트(소문자로 변환)·사용자·데이터베이스에
+넣을 수 있기 때문이며, 이때 재실행 명령과 서버 식별 정보는 unavailable로
+기록합니다. 엔드포인트 필드와 준비 확인 엔드포인트는 알려진 비밀번호를 대소문자
+구분 없이 포함하면 거부합니다. `@`가 없는 JDBC 형식 URL
+(`jdbc:cubrid:host:33000:db:u:PW:`)은 자격 증명 URL로 인식하지 않으므로,
+비밀번호를 `CUBRID_TEST_PASSWORD`에도 설정하지 않으면 적힌 그대로 기록됩니다.
+엔드포인트 해석 오류는 해석기 텍스트가 아닌 고정 메시지로 보고합니다. 임의의
+비밀이나 모든 데이터를 정화한다는 보장은 아닙니다.
 
 선택적인 준비 확인 `--server-info PATH`는 실제 엔진 버전 또는 `unavailable`
 사유를 기록합니다. 워크플로는 업로드 묶음 밖의 실행 ID·시도별 새 경로를 쓰며,
@@ -783,110 +822,33 @@ main 기반 설정/스캐너를 내려받으므로 호출자 핀만으로 이 �
 
 ### CI 매트릭스
 
-일상 CI는 Ubuntu/Python 3.12 오프라인 단일 레인과 대표 통합 조합을 사용합니다.
-PR은 스모크 검사를, main과 최근 변경이 있는 주간 실행은 전체 오프라인
-검사와 95% 커버리지를 유지합니다. 고위험 PR은 같은 단일 레인에서 전체 오프라인 회귀 검사(커버리지 제외)와
-최신 통합 조합을 선택하고,
-main/주간 실행은 최저·최신 조합을 사용합니다. 저장소 도구 검사는 관련 경로에
+일상 CI는 전체 매트릭스 대신 대표 오프라인·통합 조합을 사용합니다. 일반 PR은
+Ubuntu/Python 3.12에서 오프라인 스모크 검사를 실행합니다. 고위험 PR은 지원 범위의
+최저·최신 Python(3.11, 3.15)에서 전체 오프라인 회귀 검사(커버리지 제외)를 실행하고
+Python 3.14/CUBRID 11.4 통합 조합을 선택합니다. main, 최근 변경이 있는 주간 실행과
+수동 실행은 Python 3.11과 3.15에서 전체 오프라인 검사와 95% 커버리지를 유지하고
+Python 3.11/CUBRID 10.2 통합 조합을 추가합니다. 저장소 도구 검사는 관련 경로에
 따라 Linux 단일 레인에서 실행합니다. 전체 통합 검사는 명시적 수동 실행과
 릴리스에서 유지합니다. 정확한 선택 조건과 검증 요건은 [CI 실행 정책](CI_POLICY.md)을
-참고하세요. 아래 비용 측정은 이전 워크플로의 이력이며, 현재 잡 수나 새로운
-절감액을 나타내지 않습니다.
+참고하세요.
 
-### PR 검증 비용 (#564)
+### PR 검증 비용
 
-실제 `ci.yml` 실행(GitHub REST `/actions/runs/{id}/timing`의
-`run_duration_ms`와 작업 단계별 `started_at`/`completed_at`)에서 측정한
-값이며 추정치가 아닙니다. 일반 실행 응답에는 `run_duration_ms`가 없고
-`/timing` 응답에 있습니다. 코드 변경 기준 실행
-[36929613502](https://github.com/cubrid-lab/pycubrid/actions/runs/36929613502)은
-2026-10-01에 모든 통합 경로가 선택되어 306초(5분 6초) 걸렸습니다.
-문서만 변경한 [PR #587](https://github.com/cubrid-lab/pycubrid/pull/587)
-(`RELEASING.md`만 변경)의
-[실행 36865409050](https://github.com/cubrid-lab/pycubrid/actions/runs/36865409050)은
-419초였고 코드/TLS 경로 게이팅 통합 작업 4개가 모두 건너뛰어졌으며
-문서 린트는 통과했습니다. 이 실행의 `detect-changes`는 시작 후 약 3분이
-지나서야 실행되어 대기열 변동을 보여줄 뿐, 캐시 비교 기준은 아닙니다.
+현재 CI 비용 근거는 [CI 실행 정책](CI_POLICY.md#이벤트-계층과-비용-근거)에 있습니다.
+이벤트 계층별 러너 시간, 잡 수, 실패 검출률을 재현 가능한 정의와 함께 기록하고,
+커버리지 소유 표도 함께 둡니다(#750, #781). CI 비용을 판단할 때는 이전 수치가 아니라
+이 수치를 사용하세요.
 
-| 작업 그룹 | 작업 수 | 실행 시간 (가장 느린 작업) | 비고 |
-|---|---|---|---|
-| `offline-tests` 매트릭스 | 10 (OS 2종 × Python 5종) | 78초–124초 | 개발용 editable 설치는 11–23초. 이 한 실행에서 macOS는 같은 Python의 Linux보다 9–51% 느렸으며 일정한 비율은 아님. |
-| `integration-tests` / `integration-charset` / `integration-tls` / `official-differential` | 작업 5개, CUBRID 컨테이너 6개 | 65초–118초 | 서비스 컨테이너 초기화 단계가 있는 작업에서는 15–41초, 개발용 editable 설치는 17–22초. TLS는 자체 단계에서 Docker를 시작함. |
-| `repo-tooling-tests` 매트릭스 | 2 (ubuntu, macos) | 32초–51초 | 개발용 editable 설치는 14–15초. |
-| `lint` / `typecheck` / `compat-check` / `packaging-smoke-test` | 4 | 9초–24초 | lint/typecheck는 개발 도구, compat는 패키지만 설치(3초), packaging은 `build` 설치(2초). |
-| `doc-lint` (재사용 워크플로) | 문서 변경 시에만 경로 게이팅 | 하위 단계당 2초–8초 | 문서(`docs/**`)/Markdown 변경이 없으면 전부 건너뜀. |
+이전 #564 기준선(2026-10-01)은 지금은 존재하지 않는 워크플로를 측정했습니다.
+Python 3.10을 포함한 2 OS × 5 Python 오프라인 매트릭스와 pip 캐시를 쓰던 구성입니다.
+이 기준선은 [#564](https://github.com/cubrid-lab/pycubrid/issues/564)와 이 파일의 git
+이력에 남아 있습니다. 그 결과 중 두 가지는 지금도 유효합니다.
 
-이 기준 실행에서 `needs:` 그래프의 시작점은 `detect-changes`, 오프라인
-매트릭스, lint, typecheck, 저장소 도구 검사, compat-check로 병렬이었고,
-오프라인 작업들은 `detect-changes` 완료 *전*에 시작했습니다. Packaging은 모든
-오프라인 셀을 기다렸고, 컨테이너 기반 작업은 packaging, 오프라인, lint,
-typecheck, `detect-changes`를 기다린 뒤 시작했습니다. 이제 라이브 레인은
-`validate-target`과 `detect-changes` 직후 정적·오프라인 잡과 함께 시작하며
-([병렬 라이브 레인](CI_POLICY.md#병렬-라이브-레인) 참고), `ci-gate`는 여전히 모든
-결과를 기다립니다. 대기열 시간과 가장 느린 선행 분기도 전체 경과 시간에
-영향을 주므로 작업 시간을 단순 합산한 값이 크리티컬 패스는 아닙니다.
+- `scripts/wait_for_cubrid.py`를 변경하면 코드 경로 통합 검사가 선택됩니다
+  (`tests/test_workflow_path_impact.py`).
+- 저장소 도구 테스트가 실패·취소된 합성 결과로 `CI Gate`를 실행합니다.
 
-**줄일 수 있는 설치 비용**: 기준 실행에서는 `actions/setup-python`을 쓰는
-확장 작업이 21개였고, 그중 19개가 개발용 editable 설치를 했습니다.
-compat는 `-e .`, packaging은 `build`만 설치합니다. 각 작업의 설치
-자체는 계속 필요합니다. 새 `cache: pip`는 설치된 환경이 아니라 pip의
-전역 **다운로드 캐시**를 저장합니다. 키에는 OS, Python 버전, 의존성
-파일 해시가 포함되므로 일치하는 OS/Python 작업은 먼저 저장된 캐시를
-같은 실행의 후속 작업이나 이후 실행에서 재사용할 수 있지만, 다른 매트릭스
-셀 사이에 하나의 캐시가 공유되지는 않습니다. 첫 실행의 동시 작업은 모두
-캐시를 놓칠 수 있습니다. [setup-python 캐시 설명](https://github.com/actions/setup-python#caching-packages-dependencies)을
-참조하세요. 변경 헤드의 첫 실행은 Ubuntu/Python 3.10 pip 캐시를 찾지
-못해 나중에 저장했고, 기준 306초보다 긴 328초가 걸렸습니다. 이 콜드
-실행은 전체 속도 향상을 보여주지 않습니다. Docker 시작도 상당한 비용이며 여기서는 그대로입니다.
-
-**경로 필터 트리거 감사**: 최근 PR 실행에서 `detect-changes` 출력과 실제
-작업 결과를 대조했습니다. [이슈 #595](https://github.com/cubrid-lab/pycubrid/issues/595)를
-해결한 [PR #597](https://github.com/cubrid-lab/pycubrid/pull/597)은 TLS
-관련 경로를 건드리지 않았고,
-[실행 36879861578](https://github.com/cubrid-lab/pycubrid/actions/runs/36879861578)에서
-`integration-tls`는 `skipped`, 일반 통합 2셀·charset·official
-differential은 성공했습니다. 문서 전용 [PR #587](https://github.com/cubrid-lab/pycubrid/pull/587)에서는 코드/TLS로 경로
-게이팅된 통합 작업 4개가 모두 의도대로 건너뛰어졌습니다. 변경하지 않은
-`ci-gate`는 이들 작업의 `skipped`만 허용하고 실패/취소는 허용하지
-않습니다. 감사에서 실제 공백을 하나 발견했습니다:
-`scripts/wait_for_cubrid.py`는 컨테이너 기반 작업
-(`integration-tests`, `integration-charset`, `official-differential`)
-전부가 호출하는데도 `code:` 필터 목록에 빠져 있어, 이 스크립트만 변경하는
-PR은 병합 전 코드 경로의 통합 커버리지를 전부 건너뛸 수 있었습니다.
-`code:`에 추가하고 저장소 도구 회귀 테스트로 잠갔으며, 이는 커버리지를
-*추가*할 뿐이므로 새로운 skip을 만들지 않습니다.
-
-실제 실패 전파 증거도 있습니다.
-[실행 36776514307](https://github.com/cubrid-lab/pycubrid/actions/runs/36776514307)에서
-주장된 공식 동작 비교가 실패했고 `CI Gate`도 실패했습니다.
-추가한 저장소 도구 테스트는 변경하지 않은 게이트 셸을 직접 실행하여
-official 및 통합 결과를 합성한 `failure`/`cancelled`에서 모두
-0이 아닌 종료 코드를, 문서 전용 경로의 예상 스킵에서는 성공을
-확인합니다. 공식 비교나 게이트 자체는 완화하지 않았습니다.
-
-**변경 사항** (둘 다 추가적/안전한 변경이며, 작업 제거나 커버리지 축소,
-필수 체크나 브랜치 보호 컨텍스트 변경은 없고, 건너뛴 작업과 실패/취소된
-필수 작업을 구분하는 `ci-gate`의 통과/실패 로직은 그대로입니다):
-
-1. `ci.yml`의 모든 `actions/setup-python` 단계(YAML 10곳, 확장 작업
-   21개)에 `cache: pip` + `cache-dependency-path: pyproject.toml`을
-   추가했습니다. 일치하는 OS/Python/캐시 키를 가진 작업은 앞서 저장된
-   wheel 다운로드를 재사용할 수 있지만 editable 설치는 계속 실행합니다.
-2. 위에서 발견한 공백을 메우기 위해 `scripts/wait_for_cubrid.py`를 `code:`
-   경로 필터에 추가했습니다.
-
-**변경 후**: 이 PR의 첫 실행인
-[36932083505 시도 1](https://github.com/cubrid-lab/pycubrid/actions/runs/36932083505)은
-Ubuntu/Python 3.10 pip 캐시를 찾지 못하고 나중에 저장했으며 약 328초가
-걸려 기준 306초보다 느렸습니다. 동일 헤드를 한 번 재실행한 시도 2에서는
-해당 OS/Python 키의 캐시 적중·복원을 로그에서 확인했고, `/timing` 기준
-295초였습니다. 기준보다 11초(약 3.6%), 콜드 시도보다 약 33초 짧습니다.
-같은 개발용 editable 설치 19개의 작업별 시간 합은 기준 321초,
-콜드 275초, 웜 266초였습니다. 작업이 병렬로 겹치므로 이 합을 실제
-경과 시간 절감으로 해석할 수 없고 개별 설치의 변동도 있었습니다(웜
-lint 설치는 오히려 느림). 관측값은 제한적인 설치 비용 개선을 뒷받침하지만
-매 PR의 속도 향상을 보장하거나 전체 차이가 캐시만의 효과임을 증명하지는
-않습니다. 러너 대기열과 Docker 시작 시간도 변동했습니다.
+의존성 설치는 이후 uv로 바뀌었습니다([의존성 설치](CI_POLICY.md#의존성-설치)).
 
 ---
 
@@ -993,4 +955,10 @@ graph TD
 
 ## 변경 이력 검증
 
-`python scripts/lint_changelog.py`는 릴리스별 중복 하위 섹션을 거부합니다. Unreleased만 있는 파일도 검사하며 서로 다른 릴리스는 같은 하위 섹션 이름을 사용할 수 있습니다.
+`python scripts/lint_changelog.py`는 릴리스별 중복 하위 섹션을 거부합니다. Unreleased만 있는 파일도 검사하지만, 섹션 정책과 마찬가지로 `[Unreleased]`와 1.10.0 이후 릴리스에만 적용하며 1.10.0까지의 릴리스 기록은 다시 쓰지 않습니다. 서로 다른 릴리스는 같은 하위 섹션 이름을 사용할 수 있습니다. 펜스 코드 블록은 `scripts/lint_changelog.py`와 `scripts/compose_release_changelog.py`에서 같은 규칙을 따릅니다. 펜스 안의 `###` 줄은 제목이 아니라 항목 내용이고, 펜스 안의 `## [` 릴리스 헤더는 오류이며(`scripts/extract_release_notes.py`는 펜스를 인식하지 못해 Release 본문이 잘립니다), 닫히지 않은 펜스도 오류입니다. 0번째 열에서 시작하는 백틱 3개 펜스만 인식하며 물결표(`~~~`)나 들여쓰기/중첩 펜스는 인식하지 않습니다. 두 스크립트는 sqlalchemy-cubrid, cubrid-mcp-server, cookbook과 공유하며, 네 저장소 모두 규칙 5의 cutoff 적용을 도입한 뒤에는 `SECTION_POLICY_CUTOFF`만 다릅니다.
+
+`[Unreleased]`와 1.10.0 이후 릴리스에서는 내용이 있는 표준 `###` 섹션만 다음 순서로 허용합니다: Upgrade notes,
+Added, Changed, Deprecated, Removed, Fixed, Security, Performance, Documentation, CI, Tests. `Docs`가 아니라
+`Documentation`을 쓰고, 릴리스 자동화 항목은 `CI` 또는 `Changed`에 둡니다. 1.10.0까지의 릴리스는 기존 제목을
+유지합니다. GitHub Release 본문은 CHANGELOG 섹션에 `**Full Changelog**` 비교 링크 하나를 붙인 것입니다.
+`AGENTS.md`의 "GitHub Release Policy"를 참고하세요.

@@ -58,16 +58,24 @@ jobs:
     name: Detect changed paths
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # actions: read lets the weekly run look up the push run of the same SHA (#750).
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    # On the weekly schedule, `reuse` is 'true' for a lane family already proven at
+    # this exact SHA by a successful push run; elsewhere it is empty and changes nothing.
     outputs:
-      code: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.code == 'true' }}
+      code: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.code == 'true' && steps.reuse.outputs.code != 'true' }}
       docs: ${{ steps.filter.outputs.docs }}
-      tooling: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.tooling == 'true' }}
+      site: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.site == 'true' }}
+      tooling: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.tooling == 'true' && steps.reuse.outputs.tooling != 'true' }}
       risk: ${{ steps.filter.outputs.risk }}
-      live: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.code == 'true' && (github.event_name != 'pull_request' || steps.filter.outputs.risk == 'true') }}
-      extended: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.code == 'true' && github.event_name != 'pull_request' }}
-      tls: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.code == 'true' && (github.event_name != 'pull_request' || steps.filter.outputs.tls == 'true') }}
-      charset: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.code == 'true' && (github.event_name != 'pull_request' || steps.filter.outputs.charset == 'true') }}
-      official: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.code == 'true' && (github.event_name != 'pull_request' || steps.filter.outputs.official == 'true') }}
+      live: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.code == 'true' && steps.reuse.outputs.code != 'true' && (github.event_name != 'pull_request' || steps.filter.outputs.risk == 'true') }}
+      extended: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.code == 'true' && steps.reuse.outputs.code != 'true' && github.event_name != 'pull_request' }}
+      tls: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.code == 'true' && steps.reuse.outputs.code != 'true' && (github.event_name != 'pull_request' || steps.filter.outputs.tls == 'true') }}
+      charset: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.code == 'true' && steps.reuse.outputs.code != 'true' && (github.event_name != 'pull_request' || steps.filter.outputs.charset == 'true') }}
+      official: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.code == 'true' && steps.reuse.outputs.code != 'true' && (github.event_name != 'pull_request' || steps.filter.outputs.official == 'true') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -79,6 +87,43 @@ jobs:
         run: |
           base=$(git rev-list -1 --before="7 days ago" HEAD)
           echo "base=${base:-$(git rev-list --max-parents=0 HEAD)}" >> "$GITHUB_OUTPUT"
+      # A main push run and the weekly run of the same SHA execute the same jobs
+      # with the same commands (both are non-PR events), so the weekly run
+      # re-runs a lane family only when no successful push run of this SHA ran
+      # it. Any lookup problem selects the lanes as before (#750).
+      - name: Reuse lanes a successful push run of this SHA already ran
+        id: reuse
+        if: github.event_name == 'schedule'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const families = {code: 'offline-tests', tooling: 'repo-tooling-tests'};
+            const proven = {code: false, tooling: false};
+            try {
+              const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
+                ...context.repo, workflow_id: 'ci.yml', branch: 'main', event: 'push',
+                head_sha: context.sha, status: 'success', per_page: 100,
+              });
+              for (const run of runs) {
+                if (run.head_sha !== context.sha || run.event !== 'push' || run.conclusion !== 'success') continue;
+                const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+                  ...context.repo, run_id: run.id, filter: 'latest', per_page: 100,
+                });
+                for (const [family, prefix] of Object.entries(families)) {
+                  const lane = jobs.filter(j => j.name.startsWith(prefix));
+                  if (lane.length && lane.every(j => j.conclusion === 'success')) {
+                    proven[family] = run.html_url;
+                  }
+                }
+              }
+            } catch (error) {
+              core.warning(`Push-run lookup failed; selecting lanes from the 7-day diff: ${error.message}`);
+              proven.code = proven.tooling = false;
+            }
+            for (const [family, url] of Object.entries(proven)) {
+              core.setOutput(family, url ? 'true' : 'false');
+              core.info(`${family}: ${url ? `already passed in ${url}` : 'not proven at this SHA'}`);
+            }
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d
         id: filter
         with:
@@ -87,6 +132,13 @@ jobs:
             docs:
               - '**/*.md'
               - 'docs/**'
+            site:
+              - 'docs/**'
+              - 'pyproject.toml'
+              - 'mkdocs.yml'
+              - 'scripts/generate_llms_full.py'
+              - '.github/workflows/docs.yml'
+              - '.github/workflows/ci.yml'
             code:
               - '!{docs/**,*.md,**/*.md,LICENSE,LICENSE.*,NOTICE,llms.txt,.gitignore,.gitattributes}'
             risk:
@@ -150,6 +202,39 @@ jobs:
       fail-on-issue: false  # advisory mode during initial rollout
 
 
+  docs-build:
+    # #786: build the site on pull requests exactly as docs.yml does on main, so a
+    # broken `mkdocs build --strict` (or a docs-tool pin bump) fails before merge.
+    # Build only: nothing is uploaded or deployed from this job.
+    name: Documentation site build
+    needs: detect-changes
+    if: needs.detect-changes.outputs.site == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          ref: ${{ inputs.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v6
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: "3.12"
+          version: "0.12.17"
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+          cache-suffix: ${{ github.job }}
+      - name: Install the pinned documentation tools
+        run: |
+          uv pip install --system --group docs
+          uv pip freeze --system
+      - name: Generate llms-full.txt
+        run: python scripts/generate_llms_full.py
+      - name: Build the site (strict)
+        run: mkdocs build --strict
+
   compat-check:
     needs: detect-changes
     if: needs.detect-changes.outputs.code == 'true'
@@ -197,7 +282,7 @@ jobs:
           cache-suffix: ${{ github.job }}
       - name: Install pinned ruff from pyproject.toml
         run: |
-          uv pip install --system -e ".[dev]"
+          uv pip install --system -e . --group dev
           uv pip freeze --system
       - name: Check tool consistency, lint, and format maintained Python
         run: make lint
@@ -238,7 +323,7 @@ jobs:
           cache-suffix: ${{ github.job }}
       - name: Install dependencies
         run: |
-          uv pip install --system -e ".[dev]"
+          uv pip install --system -e . --group dev
           uv pip freeze --system
       - name: Mypy strict
         run: make typecheck
@@ -250,7 +335,11 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python-version: ["3.12"]
+        # #745: ordinary PRs keep one representative Python 3.12 smoke cell;
+        # risk-selected PRs, main pushes, the weekly schedule and manual
+        # dispatch run the full offline suite on the oldest and newest
+        # supported Python. Keep in sync with the step conditions below.
+        python-version: ${{ fromJSON(github.event_name == 'pull_request' && needs.detect-changes.outputs.risk != 'true' && '["3.12"]' || '["3.11", "3.15"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
@@ -270,7 +359,7 @@ jobs:
       - name: Install dependencies
         shell: bash
         run: |
-          uv pip install --system -e ".[dev]"
+          uv pip install --system -e . --group dev
           uv pip install --system pytest-cov
           uv pip freeze --system
       - name: Run representative PR smoke tests
@@ -288,14 +377,24 @@ jobs:
             -v --tb=short \
             --cov=pycubrid \
             --cov-report=term-missing \
-            --cov-report=xml \
+            --cov-report=xml:coverage-py${{ matrix.python-version }}.xml \
             --cov-fail-under=95
+      - name: Upload coverage report artifact
+        if: always() && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: offline-coverage-py${{ matrix.python-version }}
+          path: coverage-py${{ matrix.python-version }}.xml
+          if-no-files-found: ignore
+          retention-days: 30
       - name: Upload coverage to Codecov
         if: github.event_name != 'pull_request' && github.actor != 'dependabot[bot]'
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: ./coverage.xml
+          files: ./coverage-py${{ matrix.python-version }}.xml
+          flags: offline-py${{ matrix.python-version }}
+          name: offline-py${{ matrix.python-version }}
           verbose: true
           fail_ci_if_error: false
         env:
@@ -334,7 +433,7 @@ jobs:
       - name: Install dependencies
         shell: bash
         run: |
-          uv pip install --system -e ".[dev]"
+          uv pip install --system -e . --group dev
           uv pip freeze --system
       - name: Run repository tooling tests
         shell: bash
@@ -418,7 +517,7 @@ jobs:
           cache-suffix: ${{ github.job }}
       - name: Install pycubrid
         run: |
-          uv pip install --system -e ".[dev]"
+          uv pip install --system -e . --group dev
           uv pip freeze --system
       - name: Wait for CUBRID readiness
         run: python scripts/wait_for_cubrid.py
@@ -472,7 +571,7 @@ jobs:
           cache-suffix: ${{ github.job }}
       - name: Install pycubrid
         run: |
-          uv pip install --system -e ".[dev]"
+          uv pip install --system -e . --group dev
           uv pip freeze --system
       - name: Wait for CUBRID readiness
         run: python scripts/wait_for_cubrid.py
@@ -516,7 +615,7 @@ jobs:
           cache-suffix: ${{ github.job }}
       - name: Install pycubrid
         run: |
-          uv pip install --system -e ".[dev]"
+          uv pip install --system -e . --group dev
           uv pip freeze --system
       - name: Start CUBRID broker with SSL=ON
         run: |
@@ -716,7 +815,7 @@ jobs:
           cache-suffix: ${{ github.job }}
       - name: Install pycubrid
         run: |
-          uv pip install --system -e ".[dev]"
+          uv pip install --system -e . --group dev
           uv pip freeze --system
       - name: Restore the official oracle build
         id: oracle-cache
@@ -756,7 +855,7 @@ jobs:
             --json-out official-evidence-summary.json --summary-out "$GITHUB_STEP_SUMMARY"
       - name: Upload differential evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: official-differential-evidence
           path: |
@@ -772,7 +871,7 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [validate-target, detect-changes, lint, doc-lint, typecheck, offline-tests, packaging-smoke-test, integration-tests, repo-tooling-tests, compat-check, integration-charset, integration-tls, official-differential]
+    needs: [validate-target, detect-changes, lint, doc-lint, typecheck, offline-tests, packaging-smoke-test, integration-tests, repo-tooling-tests, docs-build, compat-check, integration-charset, integration-tls, official-differential]
     steps:
       - name: Check selected job results
         env:
@@ -794,6 +893,8 @@ jobs:
           E_INTEGRATION_TESTS: ${{ needs.detect-changes.outputs.live }}
           R_REPO_TOOLING_TESTS: ${{ needs.repo-tooling-tests.result }}
           E_REPO_TOOLING_TESTS: ${{ needs.detect-changes.outputs.tooling }}
+          R_DOCS_BUILD: ${{ needs.docs-build.result }}
+          E_DOCS_BUILD: ${{ needs.detect-changes.outputs.site }}
           R_COMPAT_CHECK: ${{ needs.compat-check.result }}
           E_COMPAT_CHECK: ${{ needs.detect-changes.outputs.code }}
           R_INTEGRATION_CHARSET: ${{ needs.integration-charset.result }}
@@ -821,6 +922,7 @@ jobs:
           check packaging-smoke-test "$R_PACKAGING_SMOKE_TEST" "$E_PACKAGING_SMOKE_TEST"
           check integration-tests "$R_INTEGRATION_TESTS" "$E_INTEGRATION_TESTS"
           check repo-tooling-tests "$R_REPO_TOOLING_TESTS" "$E_REPO_TOOLING_TESTS"
+          check docs-build "$R_DOCS_BUILD" "$E_DOCS_BUILD"
           check compat-check "$R_COMPAT_CHECK" "$E_COMPAT_CHECK"
           check integration-charset "$R_INTEGRATION_CHARSET" "$E_INTEGRATION_CHARSET"
           check integration-tls "$R_INTEGRATION_TLS" "$E_INTEGRATION_TLS"

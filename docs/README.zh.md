@@ -249,7 +249,7 @@ with engine.connect() as conn:
 | **CUBRID 10.2** | ✅ | -- | -- | -- | ✅ |
 
 CI 会在每次 PR/推送时运行上述矩阵（以 Python 3.10 和 3.14 为锚点 × 全部 CUBRID 版本）。
-完整的 **5 × 4** Python × CUBRID 矩阵会在夜间、发布标签时以及通过 `workflow_dispatch` 按需运行。
+完整的 **4 × 4** Python × CUBRID 矩阵会在显式 `workflow_dispatch` 触发时以及每次发布时运行。
 
 ## 架构
 
@@ -353,7 +353,7 @@ CUBRID 10.2、11.0、11.2 和 11.4 已在 CI 中测试。
 
 ## 安全
 
-请通过电子邮件报告漏洞——详见 [SECURITY.md](../SECURITY.md)。请勿就安全问题创建公开 issue。
+请通过 GitHub 私密漏洞报告（private vulnerability reporting）报告漏洞（备用方式为电子邮件）——详见 [SECURITY.md](../SECURITY.md)。请勿就安全问题创建公开 issue。
 
 ## 许可证
 

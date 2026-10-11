@@ -9,7 +9,11 @@ Checks:
     2. Exactly one [Unreleased] section
     3. No duplicate version sections
     4. Released versions in descending semver order
-    5. No duplicate subsections within one release
+    5. No duplicate ### subsection heading within [Unreleased] or a release newer
+       than SECTION_POLICY_CUTOFF (older releases keep their historical headings)
+    6. In [Unreleased] and releases newer than SECTION_POLICY_CUTOFF, every
+       ``###`` heading is a standard section, appears once, has content and
+       follows the standard order (AGENTS.md "GitHub Release Policy")
 
 Exit codes:
     0 — changelog is valid
@@ -22,6 +26,55 @@ import re
 import sys
 from pathlib import Path
 
+# Standard ``###`` headings, in order (AGENTS.md "GitHub Release Policy").
+ALLOWED_SECTIONS = (
+    "Upgrade notes",
+    "Added",
+    "Changed",
+    "Deprecated",
+    "Removed",
+    "Fixed",
+    "Security",
+    "Performance",
+    "Documentation",
+    "CI",
+    "Tests",
+)
+# Latest release when the section policy was adopted. This release and every
+# older one keep their historical headings; their notes are never rewritten.
+SECTION_POLICY_CUTOFF = (1, 10, 0)
+
+
+def section_policy_applies(name: str) -> bool:
+    """[Unreleased] and versions newer than the cutoff; unparsable names fail safe."""
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", name)
+    if match is None:
+        return True
+    return tuple(int(n) for n in match.groups()) > SECTION_POLICY_CUTOFF
+
+
+def check_sections(name: str, sections: list[tuple[str, str]]) -> str | None:
+    """Return the first section-policy violation of one release, or None."""
+    last = -1
+    for title, body in sections:
+        if title not in ALLOWED_SECTIONS:
+            return (
+                f"Subsection '### {title}' in [{name}] is not a standard section "
+                f"(allowed, in order: {', '.join(ALLOWED_SECTIONS)})"
+            )
+        if not body.strip():
+            return f"Subsection '### {title}' in [{name}] is empty"
+        index = ALLOWED_SECTIONS.index(title)
+        if index == last:
+            return f"Duplicate subsection '### {title}' in [{name}]"
+        if index < last:
+            return (
+                f"Subsection '### {title}' in [{name}] must come before "
+                f"'### {ALLOWED_SECTIONS[last]}'"
+            )
+        last = index
+    return None
+
 
 def main() -> int:
     changelog = Path(__file__).resolve().parent.parent / "CHANGELOG.md"
@@ -31,6 +84,56 @@ def main() -> int:
 
     content = changelog.read_text(encoding="utf-8")
     headers = re.findall(r"^## \[(\S+)\]", content, re.MULTILINE)
+
+    # Rule 5: No duplicate ### subsection heading within one version section after the
+    # cutoff (fenced code blocks are ignored so example headings do not trip the check).
+    # The same pass collects each release's ### sections and their bodies for rule 6;
+    # fenced lines count as body content, never as headings.
+    section = ""
+    seen_subsections: set[tuple[str, str]] = set()
+    releases: list[tuple[str, list[tuple[str, str]]]] = []
+    in_fence = False
+    for line in content.splitlines():
+        if in_fence and line.startswith("## ["):
+            print(
+                "ERROR: Release header inside an open code fence in CHANGELOG.md",
+                file=sys.stderr,
+            )
+            return 1
+        section_match = None if in_fence else re.match(r"^## \[(\S+)\]", line)
+        if section_match:
+            section = section_match.group(1)
+            releases.append((section, []))
+            continue
+        heading = None if in_fence else re.match(r"^###\s+(.+)$", line)
+        if heading and releases:
+            releases[-1][1].append((heading.group(1).strip(), ""))
+        elif releases and releases[-1][1]:
+            title, body = releases[-1][1][-1]
+            releases[-1][1][-1] = (title, body + line + "\n")
+        if line.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        if line.startswith("### ") and section_policy_applies(section):
+            key = (section, line.strip())
+            if key in seen_subsections:
+                print(
+                    f"ERROR: Duplicate subsection heading '{line.strip()}' in [{section}]",
+                    file=sys.stderr,
+                )
+                return 1
+            seen_subsections.add(key)
+    if in_fence:
+        print("ERROR: Unclosed code fence in CHANGELOG.md", file=sys.stderr)
+        return 1
+
+    # Rule 6: standard ### sections in [Unreleased] and releases after the cutoff.
+    for name, sections in releases:
+        if section_policy_applies(name) and (error := check_sections(name, sections)):
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
 
     if not headers:
         print("ERROR: No version sections found (expected '## [X.Y.Z]')", file=sys.stderr)
@@ -52,26 +155,6 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-
-    # Subsections are unique within each release, including Unreleased-only files.
-    current_version: str | None = None
-    subsections: set[str] = set()
-    for line in content.splitlines():
-        version = re.match(r"^## \[(\S+)\]", line)
-        if version:
-            current_version = version.group(1)
-            subsections.clear()
-            continue
-        subsection = re.match(r"^###\s+(.+)$", line)
-        if current_version is not None and subsection:
-            title = subsection.group(1).strip()
-            if title in subsections:
-                print(
-                    f"ERROR: Duplicate subsection '### {title}' in [{current_version}]",
-                    file=sys.stderr,
-                )
-                return 1
-            subsections.add(title)
 
     versions = [h for h in headers if h != "Unreleased"]
 

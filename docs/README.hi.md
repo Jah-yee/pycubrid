@@ -250,7 +250,7 @@ with engine.connect() as conn:
 | **CUBRID 10.2** | ✅ | -- | -- | -- | ✅ |
 
 CI हर PR/push पर ऊपर दी गई matrix चलाता है (Python 3.10 + 3.14 anchors × सभी CUBRID versions)।
-पूर्ण **5 × 4** Python × CUBRID matrix nightly, tagged releases पर, और `workflow_dispatch` के जरिए on demand चलती है।
+पूर्ण **4 × 4** Python × CUBRID matrix स्पष्ट `workflow_dispatch` पर और हर release पर चलती है।
 
 ## आर्किटेक्चर
 
@@ -354,7 +354,7 @@ CUBRID 10.2, 11.0, 11.2, और 11.4 CI में टेस्ट किए ज�
 
 ## सुरक्षा
 
-कमज़ोरियों की रिपोर्ट ईमेल के माध्यम से करें — विवरण के लिए [SECURITY.md](../SECURITY.md) देखें। सुरक्षा चिंताओं के लिए सार्वजनिक issues न खोलें।
+कमज़ोरियों की रिपोर्ट GitHub की निजी vulnerability reporting के माध्यम से करें (वैकल्पिक रूप से ईमेल) — विवरण के लिए [SECURITY.md](../SECURITY.md) देखें। सुरक्षा चिंताओं के लिए सार्वजनिक issues न खोलें।
 
 ## लाइसेंस
 

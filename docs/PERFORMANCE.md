@@ -1,22 +1,29 @@
 # Performance Guide
 
-This guide summarizes benchmark behavior for `pycubrid` and shows practical tuning steps.
+This guide covers the performance of `pycubrid` running on CUBRID: how to measure it, what is
+measured for the current release, and how to profile and tune it.
+
+It does not compare CUBRID with other database engines. A comparison across engines mixes
+server-engine differences with driver overhead, so it cannot tell you how fast the driver is.
 
 ---
 
 ## Table of Contents
 
-- [Overview](#overview)
-- [Benchmark Results](#benchmark-results)
-- [Performance Characteristics](#performance-characteristics)
-- [Optimization Tips](#optimization-tips)
-- [Performance Investigation](#performance-investigation)
-- [Timing & Profiling Hooks](#timing--profiling-hooks)
-- [Running Benchmarks](#running-benchmarks)
+- [Performance Overview](#performance-overview)
+- [Benchmark Methodology](#benchmark-methodology)
+- [Current Release Baseline](#current-release-baseline)
+- [Performance Regression](#performance-regression)
+- [Sync and Async Characteristics](#sync-and-async-characteristics)
+- [Batch Processing](#batch-processing)
+- [Fetch and Memory Performance](#fetch-and-memory-performance)
+- [Profiling and Optimization](#profiling-and-optimization)
+- [Known Limitations](#known-limitations)
+- [Reproduction Guide](#reproduction-guide)
 
 ---
 
-## Overview
+## Performance Overview
 
 `pycubrid` is a pure Python DBAPI2 driver that talks to CUBRID over the CAS binary protocol.
 
@@ -37,37 +44,426 @@ flowchart TD
     Exec --> Decode[Row decoding to Python objects]
 ```
 
----
-
-## Benchmark Results
-
-Source: [cubrid-benchmark](https://github.com/cubrid-lab/cubrid-benchmark)
-
-Environment: Intel Core i5-9400F @ 2.90GHz, 6 cores, Linux x86_64, Docker containers.
-
-Workload: Python `pycubrid` vs `PyMySQL`, 10000 rows x 5 rounds.
-
-| Scenario | CUBRID (pycubrid) | MySQL (PyMySQL) | Ratio (CUBRID/MySQL) |
-|---|---:|---:|---:|
-| insert_sequential | 10.47s | 1.74s | 6.0x |
-| select_by_pk | 15.99s | 3.52s | 4.5x |
-| select_full_scan | 10.31s | 1.86s | 5.5x |
-| update_indexed | 10.70s | 2.19s | 4.9x |
-| delete_sequential | 10.75s | 2.10s | 5.1x |
-
----
-
-## Performance Characteristics
-
 - `pycubrid` is pure Python, so packet encode/decode and row conversion run in the interpreter.
-- `PyMySQL` can benefit from optional C acceleration in parts of the stack, which reduces CPU overhead.
 - CAS uses a binary protocol with explicit packet framing and parsing; this adds per-request work.
 - Small, chatty queries amplify Python-level and round-trip overhead.
 - Throughput improves when calls are batched and transaction boundaries are controlled.
 
+Driver performance is tracked against two references, both on the same CUBRID server:
+
+- **Release to release** — the current `pycubrid` release against an earlier release.
+- **Driver overhead** — `pycubrid` against the official `CUBRIDdb` driver.
+
 ---
 
-## Optimization Tips
+## Benchmark Methodology
+
+A benchmark result is only useful when the driver is the one thing that changes.
+
+- **Same server.** Run every driver or release under test against the same CUBRID server, on
+  the same host, with the same schema and data. Do not compare results across database
+  engines.
+- **Same transaction mode.** Set `autocommit` explicitly on every connection under test. Drivers
+  have different defaults, and a commit per statement changes the result.
+- **Record the environment.** CPU, OS, Python version, CUBRID version, `pycubrid` version and
+  `fetch_size`.
+- **Repeat.** Run several rounds and report the median and spread, not a single run.
+
+Tools in this repository:
+
+| Tool | What it measures | Needs a server |
+|---|---|---|
+| `tests/test_benchmarks.py` | Connect, single-row CRUD, 100-row insert/select and prepared reuse (pytest-benchmark) | Yes |
+| `tests/test_bench_fetch_parsing.py` | FETCH reply parsing of synthetic 2000-row replies | No |
+| `scripts/bench_regression.py` | Median change between two pytest-benchmark JSON files | No |
+| `scripts/profile_*.py` | cProfile of connect, execute and fetch | Yes |
+
+Larger workloads and the harness for comparing drivers live in
+[cubrid-benchmark](https://github.com/cubrid-lab/cubrid-benchmark).
+
+---
+
+## Current Release Baseline
+
+Measured on 2026-10-11 for [#797](https://github.com/cubrid-lab/pycubrid/issues/797) with the
+[`pycubrid-release-baseline`](https://github.com/cubrid-lab/cubrid-benchmark/tree/main/experiments/pycubrid-release-baseline)
+experiment in `cubrid-benchmark`. That experiment also holds the raw results, the
+reproduction command and the full tables.
+
+| Item | Value |
+|---|---|
+| CPU | Intel Core i5-9400F @ 2.90 GHz, 6 cores (1 thread per core) |
+| Memory | 31 GiB |
+| OS | Ubuntu 22.04.5 LTS, Linux 5.15.0-198-generic, x86_64 |
+| Python | CPython 3.12.13 |
+| CUBRID | 11.4.6 (`cubrid/cubrid:11.4` in Docker 29.2.1, localhost) |
+| `pycubrid` | `main` at `2228d66`, and 1.10.0 from PyPI |
+| `CUBRIDdb` | cubrid-python `v11.3.0.51` (`c63ab9c`), C extension over CCI |
+| Transaction mode | `autocommit=False` on every connection (`connect(autocommit=False)` for `pycubrid`), explicit `commit()` per write |
+| `fetch_size` | 100 (default), plus 1,000 and 10,000 for the fetch cases |
+| Data | 10,000 rows of `(INT PK, VARCHAR(100), VARCHAR(200), INT)` |
+| Repetitions | 5 trials per driver in rotating order; samples pooled; warm-up discarded |
+| Load | Shared machine with other users active, so results are noisy |
+
+Every reported iteration was checked for the right row counts and values. Times are pooled
+medians in milliseconds per operation; the full report also has p95, IQR and the per-trial
+spread.
+
+### Current release against 1.10.0
+
+**No regression was detected.** A regression here means the `main` median is more than 5%
+slower and the interquartile ranges do not overlap. The second condition means that only a
+slowdown larger than the spread of the samples can be detected. Given the measured spread, the
+rule detects slowdowns of at least:
+
+| Operation | Minimum detectable slowdown |
+|---|---:|
+| `fetchone` / `fetchmany` / `fetchall`, 10,000 rows | 6-8% |
+| `executemany()` 10,000 / 1,000 / 100 rows | 5% / 18% / 172% |
+| connect + close | 22% |
+| SELECT by primary key, single-row writes + commit | 25-26% |
+| single-row execute without commit | 271-307% |
+
+The per-trial medians of `main` and 1.10.0 overlap in every case except `executemany()` of
+10,000 rows, where `main` is about 0.7% slower in every trial. That is well below the 5%
+threshold.
+
+| Operation | `main` | 1.10.0 | Ratio |
+|---|---:|---:|---:|
+| connect + close | 1.50 | 1.49 | 1.01 |
+| SELECT by primary key | 0.60 | 0.60 | 1.00 |
+| INSERT + commit | 34.5 | 33.9 | 1.02 |
+| UPDATE + commit | 33.8 | 33.9 | 1.00 |
+| DELETE + commit | 41.2 | 41.3 | 1.00 |
+| `executemany()` 100 / 1,000 / 10,000 rows | 125 / 360 / 3,018 | 125 / 358 / 2,998 | 1.00 / 1.00 / 1.01 |
+| `fetchone` / `fetchmany` / `fetchall`, 10,000 rows | 51.2 / 48.4 / 49.7 | 50.6 / 48.9 / 49.6 | 1.01 / 0.99 / 1.00 |
+
+### `pycubrid` against `CUBRIDdb` on the same server
+
+| Operation | `pycubrid` | `CUBRIDdb` | `pycubrid` / `CUBRIDdb` |
+|---|---:|---:|---:|
+| connect + close | 1.50 | 1.00 | 1.49× |
+| SELECT by primary key | 0.60 | 0.55 | 1.10× |
+| INSERT / UPDATE + commit | 34.5 / 33.8 | 33.5 / 33.6 | 1.03× / 1.01× |
+| `executemany()` 100 / 1,000 / 10,000 rows | 125 / 360 / 3,018 | 109 / 266 / 2,150 | 1.15× / 1.35× / 1.40× |
+| `fetchone` / `fetchmany` / `fetchall`, 10,000 rows | 51.2 / 48.4 / 49.7 | 40.6 / 40.7 / 39.4 | 1.26× / 1.19× / 1.26× |
+
+- Single-row writes are bound by the server commit. Latency falls into clusters at about 33,
+  41, 75 and 83 ms for both drivers, so driver overhead is a small share of a write.
+  (DELETE + commit measured 41.2 ms against 33.8 ms only because the median fell into a
+  different cluster.)
+- `executemany()` sends one batch request, but it is still slower than `CUBRIDdb`, which runs
+  one prepared execute per row; the time is spent on the server, see
+  [where the gap comes from](#executemany-against-cubriddb-where-the-gap-comes-from).
+- Fetching 10,000 rows takes 19-26% longer than with the C extension.
+
+### Sync against async
+
+PK SELECT throughput, in queries per second. Each worker has its own connection and runs 200
+queries.
+
+| Workers | Sync (threads) | Async (`pycubrid.aio` tasks) | `CUBRIDdb` (threads) |
+|---:|---:|---:|---:|
+| 1 | 1,510 | 1,414 | 1,725 |
+| 8 | 5,336 | 5,672 | 981 |
+| 32 | 5,173 | 5,693 | 956 |
+
+On one connection, async is about 6% slower than sync. With 8-32 concurrent connections it
+is 6-10% faster. From 1 to 8 workers, sync scales about 3.5× and async about 4.0×; both level
+off after that. Per-query p95 at 32 workers is 13.0 ms for sync and 8.8 ms for async.
+`CUBRIDdb` throughput drops when more than one thread uses it, because its C extension does
+not release the GIL during CCI calls.
+
+### `executemany()` batch throughput
+
+| Rows | Time incl. commit (ms) | Rows/s | Peak Python heap |
+|---:|---:|---:|---:|
+| 100 | 125 | 803 | 42 KiB |
+| 1,000 | 360 | 2,780 | 364 KiB |
+| 10,000 | 3,018 | 3,314 | 3.6 MiB |
+
+Client memory grows by about 380 bytes per row, which confirms
+[Known Limitations](#known-limitations).
+
+### `executemany()` against `CUBRIDdb`: where the gap comes from
+
+The gap above was investigated in
+[#822](https://github.com/cubrid-lab/pycubrid/issues/822) with the
+[`pycubrid-executemany-overhead`](https://github.com/cubrid-lab/cubrid-benchmark/tree/main/experiments/pycubrid-executemany-overhead)
+experiment (CUBRID 11.4.6, five trials, medians, commit included). The numbers come from a
+shared, loaded machine; only the medians and the phase shares are reliable.
+
+| Batch of | `pycubrid` / `CUBRIDdb` INSERT | UPDATE | DELETE | MERGE |
+|---|---:|---:|---:|---:|
+| 100 rows | 1.13× | 1.13× | 1.13× | 1.49× |
+| 1,000 rows | 1.39× | 1.65× | 1.48× | 2.64× |
+| 10,000 rows | 1.54× | 1.56× | 1.47× | 4.72× |
+
+- **The gap is on the server, not in the driver.** For 10,000 INSERT rows, 95% of the
+  statement phase is waiting for the broker's reply. Rendering parameters into SQL is 4% and
+  packet write and parse together are under 1%. The broker SQL log shows the CAS busy for
+  2,734 of the 2,865 ms the client measured.
+- **One round trip does not make a batch cheaper.** The server spends about 275 µs on each
+  literal statement in the batch, against about 131 µs on each execute of a statement
+  prepared once. A round trip on loopback costs about 76 µs, so sending 10,000 prepared
+  executes still finishes sooner than one batch of 10,000 literal statements.
+- **Client optimisation cannot close it.** Caching the placeholder tokenisation and similar
+  work would recover at most about 2-4% of the statement phase.
+- **MERGE is the worst case.** Literal MERGE statements get few plan-cache hits (548-702 of
+  1,000 in the broker log), which is why the batch is up to 4.72× `CUBRIDdb`.
+- **Memory:** about 360 bytes per row while the batch is built; it is released after the
+  call.
+
+What you can do:
+
+- Keep committing once per batch, not once per row. Commit is already 53% of a 100-row batch
+  and identical for both drivers.
+- For large MERGE batches, or when a batch is much slower than your own row-by-row
+  measurement, consider a prepared loop with the explicit `pycubrid.compat.native` cursor
+  (one `PREPARE`, then one execute per row). It reached 0.99-1.31× of `CUBRIDdb` for INSERT,
+  UPDATE and DELETE and 1.17× for MERGE at 10,000 rows. The measurement ran with autocommit off
+  and one explicit commit per batch; the harness set the driver's autocommit flag directly,
+  and the public way to get the same mode is `connection.set_autocommit(False)` followed by
+  `commit()`.
+  Measure it on your own workload first:
+  `bind_param()` takes only scalar INT, string and `NULL` values (collections and LOBs use the
+  dedicated `bind_set()` and `bind_lob()` APIs), and the error behaviour differs. A prepared
+  loop stops at the first failing row. A batch sends every statement to the server even after
+  one fails, but `executemany()` raises only the first returned error, so later failures are
+  not reported.
+- Do not use `execute()` in a loop as a faster alternative. It was 1.6-6.1× `CUBRIDdb`'s
+  `executemany()`, because every row is a new prepare plus extra requests.
+
+Not established: the gap against `CUBRIDdb` on CUBRID 10.2, 11.0 and 11.2, and how the server
+time splits between the CAS and the engine. Prepared batch paths were measured on all four
+versions; see the next section. Caching the placeholder tokenisation is tracked in
+[#837](https://github.com/cubrid-lab/pycubrid/issues/837).
+
+### Prepared batch paths: the `EXECUTE_ARRAY` evaluation
+
+[#836](https://github.com/cubrid-lab/pycubrid/issues/836) measured two prepared alternatives to
+the literal batch with the same workload, in the
+[`pycubrid-prepared-batch`](https://github.com/cubrid-lab/cubrid-benchmark/tree/main/experiments/pycubrid-prepared-batch)
+experiment. Autocommit was off, the commit was included, and the medians come from five trials on
+11.4 and three on the other versions, on a shared machine:
+
+- a prepared loop with `pycubrid.compat.native`: one `PREPARE`, then one execute per row;
+- a prototype of the `EXECUTE_ARRAY` request (function code 21): one `PREPARE`, one request
+  carrying every row's bound values, one close. pycubrid does not send this request today; the
+  prototype lived in the benchmark harness.
+
+Time of the `EXECUTE_ARRAY` prototype as a fraction of `executemany()` at 10,000 rows:
+
+| CUBRID | INSERT | UPDATE | DELETE | MERGE |
+|---|---:|---:|---:|---:|
+| 11.4.6 | 0.40 | 0.33 | 0.35 | 0.15 |
+| 11.2.9 | 0.44 | 0.38 | 0.39 | 0.16 |
+| 11.0.16 | 0.55 | 0.50 | 0.51 | 0.16 |
+| 10.2.18 | 0.53 | 0.51 | 0.51 | 0.61 |
+
+- **`EXECUTE_ARRAY` is the fastest path on every version.** On 11.4 the statement phase for 10,000
+  rows falls from 2,887 to 954 ms for INSERT and from 13,020 to 1,739 ms for MERGE. It is also
+  0.41-0.54× of the prepared loop for INSERT, UPDATE and DELETE.
+- **The prepared loop is not faster everywhere.** It is 0.79-1.06× of `executemany()` on 11.4 and
+  11.2, but 1.13-1.22× on 11.0 and 10.2 for INSERT, UPDATE and DELETE. MERGE is faster with it on
+  every version.
+- **Transactions, partial failures and `rowcount` match the current batch.** On all four versions,
+  when one row fails `EXECUTE_ARRAY` still executes the other rows, as `executemany()` does today.
+  Only the failing row is undone. With autocommit on, each successful row is committed. With
+  autocommit off, `rollback()` removes every row and `commit()` keeps the successful ones. The
+  per-row counts and their sum are identical. The prepared loop stops at the first failing row
+  instead.
+- **Types and coercion differ.** The prepared encoders take only a 32-bit `int`, `str`, `None`,
+  INT/STRING collections and LOB handles. `bool`, larger ints, `float`, `Decimal`, `date`,
+  `datetime` and `bytes` are rejected, while `executemany()` renders them all. Values are coerced
+  as host variables, not literals, so server error text differs. With autocommit on, a LOB handle
+  fails after the first row's commit.
+
+Decision: `executemany()` keeps the literal batch by default, because a default switch would change
+which values are accepted and how they are converted. An opt-in `EXECUTE_ARRAY` path is tracked
+in [#839](https://github.com/cubrid-lab/pycubrid/issues/839), the wider prepared type set it needs
+in [#840](https://github.com/cubrid-lab/pycubrid/issues/840), and reporting which batch rows failed
+in [#841](https://github.com/cubrid-lab/pycubrid/issues/841).
+
+### Fetch throughput and peak memory by `fetch_size`
+
+10,000 rows over localhost:
+
+| Method | `fetch_size` 100 | 1,000 | 10,000 | Peak Python heap (`fetch_size` 100) |
+|---|---:|---:|---:|---:|
+| `fetchone()` loop | 51.2 ms | — | — | 130 KiB |
+| `fetchmany(100)` loop | 48.4 ms | 49.0 ms | 49.5 ms | 132 KiB |
+| `fetchall()` | 49.7 ms | 48.9 ms | 48.1 ms | 2.1 MiB (the result list) |
+
+About 200,000 rows/s in every case. Over localhost, `fetch_size` makes no measurable
+difference; it may matter on a network with higher latency, which was not measured. Peak memory
+was measured only at the default `fetch_size` of 100.
+
+### Not measured
+
+- Async for `CUBRIDdb`, which has no async API.
+- A `fetch_size` sweep for `CUBRIDdb`, which does not expose a fetch size.
+- Native (C) memory of `CUBRIDdb`. `tracemalloc` only sees the Python heap.
+- Peak memory at `fetch_size` 1,000 and 10,000.
+- Per-operation RSS. Only the process peak was recorded (about 39 MiB).
+- `executemany()` against `CUBRIDdb` on CUBRID versions other than 11.4, and the split of
+  `executemany()` server time between the CAS and the engine.
+- The extra `lastrowid` round trip.
+- Remote networks, TLS, LOB and collection types.
+- Python versions other than 3.12, and CUBRID versions other than 11.4 (except the prepared batch
+  evaluation, which ran on 10.2-11.4).
+
+### Historical Results (2026-03, pycubrid 0.5.0)
+
+The earliest published `pycubrid` measurements are kept, unchanged, in the
+[`baseline-multilang` experiment](https://github.com/cubrid-lab/cubrid-benchmark/tree/main/experiments/baseline-multilang)
+of `cubrid-benchmark` (run `2026-03-16_initial`: `pycubrid` 0.5.0, CPython 3.10.12,
+CUBRID 11.2 in Docker).
+
+They are **historical** and are not a baseline for the current release. Known limitations:
+
+- They predate the cursor memory-bounding fix
+  ([#203](https://github.com/cubrid-lab/pycubrid/issues/203),
+  [PR #207](https://github.com/cubrid-lab/pycubrid/pull/207), released in 1.6.0). Before that
+  fix, `Cursor` and `AsyncCursor` kept the whole result set in their row buffer, so fetch
+  numbers from that period do not reflect current behaviour.
+- They predate the fetch fix released in 0.6.0 (commit `bb687dc`). In 0.5.0, `fetchall()`
+  returned only the first fetch batch, so SELECT scenarios that read more than one batch did
+  not read the whole result.
+- That experiment compares two database engines. This guide does not reproduce it, for the
+  reason given at the top of the page.
+
+---
+
+## Performance Regression
+
+The weekly **Bug Hunt** workflow (`.github/workflows/bug-hunt.yml`, job `perf-trend`) runs
+`tests/test_benchmarks.py` against CUBRID 11.4 and compares the medians with the previous run
+using `scripts/bench_regression.py`. It is a trend report: it does not set a fail threshold and
+does not gate pull requests or releases.
+
+The release-to-release comparison is published in
+[Current Release Baseline](#current-release-baseline): `main` against 1.10.0.
+
+Investigate when:
+
+- The trend report shows a median increase over the previous run.
+- A CI run flags a deviation from the previous run's numbers.
+- You are about to submit a change to the hot path (protocol.py, packet.py, cursor.py).
+
+### Comparing Two Runs
+
+```bash
+# Run the live microbenchmarks on the old and the new code:
+pytest tests/test_benchmarks.py --benchmark-enable --benchmark-json=before.json
+pytest tests/test_benchmarks.py --benchmark-enable --benchmark-json=after.json
+
+# Report the median change per benchmark (add --fail-threshold PCT to fail on a regression):
+python scripts/bench_regression.py --baseline before.json --current after.json
+```
+
+### Fetch Reply Parsing (Offline)
+
+`tests/test_bench_fetch_parsing.py` times FC8 FETCH reply parsing with no
+server (#559). It covers 2000-row synthetic replies for scalar, text, mixed
+(with NULLs) and collection workloads, built with the fuzz seed builders, and
+checks every parse against their exact expected rows. Without
+`--benchmark-enable` each workload is parsed once as a correctness test, so
+required CI has no timing threshold.
+
+```bash
+# Time it (30 rounds after 3 warmup rounds), with peak allocation in extra_info:
+pytest tests/test_bench_fetch_parsing.py --benchmark-enable \
+    --benchmark-json=fetch-parse.json
+
+# Compare two runs:
+python scripts/bench_regression.py --baseline before.json --current after.json
+```
+
+---
+
+## Sync and Async Characteristics
+
+- `pycubrid.connect()` returns a blocking `Connection`; `pycubrid.aio.connect()` returns an
+  `AsyncConnection` that awaits network I/O instead of blocking.
+- Both build and parse the same CAS packets, so the per-request encode/decode work is the same.
+- An `AsyncConnection` serialises its requests with an `asyncio.Lock`: one connection runs one
+  request at a time. Async helps when many connections or other I/O run concurrently on one
+  event loop, not when a single connection runs one query after another.
+- Async timings from the [timing hooks](#timing--profiling-hooks) include event-loop scheduling
+  latency.
+
+Measured sync and async throughput is in [Sync against async](#sync-against-async).
+
+---
+
+## Batch Processing
+
+`executemany()` on a sync or async cursor uses a batch path when the statement starts with
+`INSERT`, `UPDATE`, `DELETE` or `MERGE`:
+
+1. The driver renders every parameter set into a complete SQL string on the client (see
+   [Parameter Binding](PARAMETER_BINDING.md)).
+2. It sends all the strings in a single `BatchExecutePacket`, so the whole batch takes one
+   round trip instead of one per row.
+3. `rowcount` is the sum of the affected rows.
+
+Other statements, such as `SELECT`, fall back to calling `execute()` once per parameter set.
+`executemany_batch(sql_list)` sends a list of SQL strings you have already rendered in the same
+single request.
+
+Practical advice:
+
+- Group a write burst in one explicit transaction instead of committing per statement.
+- Split very large parameter sequences into chunks; see
+  [Known Limitations](#known-limitations) for why.
+
+Measured batch throughput is in [`executemany()` batch throughput](#executemany-batch-throughput).
+How the batch compares with `CUBRIDdb`, and why it can be slower, is in
+[where the gap comes from](#executemany-against-cubriddb-where-the-gap-comes-from).
+
+---
+
+## Fetch and Memory Performance
+
+`fetch_size` sets how many rows the driver asks the CAS broker for in each fetch round trip.
+It defaults to `100`. Set it per connection with `pycubrid.connect(..., fetch_size=N)` or per
+cursor with `cursor.fetch_size = N` (an integer of at least 1).
+`fetch_size` is not `arraysize`: `arraysize` is only the default row count of `fetchmany()`.
+
+Since 1.6.0 ([#203](https://github.com/cubrid-lab/pycubrid/issues/203)), each fetch replaces
+the cursor's row buffer instead of adding to it, so the buffer holds at most one fetch batch:
+
+- `fetchone()`, `fetchmany()` and iteration keep memory bounded by `fetch_size`.
+- `fetchall()` builds one list with every remaining row, so its memory grows with the result
+  set. It releases the internal buffer when it finishes.
+- A larger `fetch_size` means fewer round trips and more memory per batch; a smaller one means
+  the reverse.
+
+Measured fetch throughput and peak memory for different `fetch_size` values are in
+[Fetch throughput and peak memory by `fetch_size`](#fetch-throughput-and-peak-memory-by-fetch_size).
+
+### Profiling Fetch
+
+`scripts/profile_fetch.py` profiles `fetchone`, `fetchmany` and `fetchall` against a live
+server.
+
+```bash
+# 1000 rows, 50 fetch iterations (default):
+python scripts/profile_fetch.py
+
+# 5000 rows, 20 iterations, fetchmany batch size 100:
+python scripts/profile_fetch.py --rows 5000 --iterations 20 --fetch-size 100
+
+# Save .prof for snakeviz:
+python scripts/profile_fetch.py --output fetch.prof
+```
+
+---
+
+## Profiling and Optimization
+
+### Optimization Tips
 
 - Use explicit transactions for write bursts instead of per-statement commits.
 - Batch inserts and updates with `executemany()` where possible.
@@ -86,28 +482,17 @@ flowchart TD
     Txn -->|No| Net[Profile network and CAS round-trips]
 ```
 
----
+### Performance Investigation
 
-## Performance Investigation
-
-Use this workflow when [cubrid-benchmark](https://github.com/cubrid-lab/cubrid-benchmark)
-detects a measurable gap or regression. The goal is to reproduce, profile, fix, and verify —
-without hardcoding thresholds that age badly.
-
-### When to Investigate
-
-- A benchmark run shows a ratio increase vs the baseline recorded in this document.
-- A CI run flags a deviation from the previous run's numbers.
-- You are about to submit a change to the hot path (protocol.py, packet.py, cursor.py).
-
-### Workflow
+Use this workflow when a benchmark detects a measurable regression. The goal is to reproduce,
+profile, fix, and verify — without hardcoding thresholds that age badly.
 
 ```mermaid
 flowchart TD
-    Detect[cubrid-benchmark detects gap] --> Issue[File a Performance issue\nusing the issue template]
+    Detect[Benchmark detects a regression] --> Issue[File a Performance issue\nusing the issue template]
     Issue --> Profile[Run profiling scripts\nto isolate the hot path]
     Profile --> Optimize["Apply targeted fix\n(see Optimization Tips)"]
-    Optimize --> Verify[Re-run profiling scripts\nand cubrid-benchmark]
+    Optimize --> Verify[Re-run profiling scripts\nand benchmarks]
     Verify --> Close[Attach results to issue\nand close]
 ```
 
@@ -126,13 +511,13 @@ flowchart TD
 3. **Optimise** — guided by cProfile's cumulative time, focus changes on the top frames.
    Keep patches targeted; avoid speculative refactors.
 
-4. **Verify** — re-run the profiling script and the full benchmark suite.
+4. **Verify** — re-run the profiling script and the benchmarks.
    Attach before/after numbers to the issue.
 
 ### Running the Profiling Scripts
 
 All scripts require a live CUBRID instance. Defaults target `localhost:33000/demodb` with
-user `dba`.
+user `dba`. For `scripts/profile_fetch.py`, see [Profiling Fetch](#profiling-fetch).
 
 #### Connection handshake
 
@@ -160,37 +545,6 @@ python scripts/profile_execute.py --operation insert --iterations 200
 python scripts/profile_execute.py --output exec.prof
 ```
 
-#### Result fetching
-
-```bash
-# 1000 rows, 50 fetch iterations (default):
-python scripts/profile_fetch.py
-
-# 5000 rows, 20 iterations, fetchmany batch size 100:
-python scripts/profile_fetch.py --rows 5000 --iterations 20 --fetch-size 100
-
-# Save .prof for snakeviz:
-python scripts/profile_fetch.py --output fetch.prof
-```
-
-#### Fetch reply parsing (offline)
-
-`tests/test_bench_fetch_parsing.py` times FC8 FETCH reply parsing with no
-server (#559). It covers 2000-row synthetic replies for scalar, text, mixed
-(with NULLs) and collection workloads, built with the fuzz seed builders, and
-checks every parse against their exact expected rows. Without
-`--benchmark-enable` each workload is parsed once as a correctness test, so
-required CI has no timing threshold.
-
-```bash
-# Time it (30 rounds after 3 warmup rounds), with peak allocation in extra_info:
-pytest tests/test_bench_fetch_parsing.py --benchmark-enable \
-    --benchmark-json=fetch-parse.json
-
-# Compare two runs:
-python scripts/bench_regression.py --baseline before.json --current after.json
-```
-
 #### Visualising .prof files with snakeviz
 
 ```bash
@@ -201,24 +555,22 @@ snakeviz profile_output.prof
 snakeviz opens an interactive flame graph in the browser, making it easy to drill into
 nested call stacks.
 
----
-
-## Timing & Profiling Hooks
+### Timing & Profiling Hooks
 
 For lightweight in-process diagnosis you can opt into the driver's built-in timing
 instrumentation instead of running the cProfile-based scripts above. Hooks are **off by
 default** — when disabled the timing module is never imported and the hot path runs
 unchanged.
 
-### When to use which
+#### When to use which
 
 | Use case | Tool |
 |---|---|
 | "Where is wall-clock time going across `connect` / `execute` / `fetch` / `close` in my application?" | `enable_timing=True` (this section) |
 | "Which Python frames inside `cursor.execute` are hot?" | `scripts/profile_execute.py` (cProfile) |
-| "How does pycubrid compare to PyMySQL on a controlled workload?" | [cubrid-benchmark](https://github.com/cubrid-lab/cubrid-benchmark) |
+| "Did this change make the driver slower than the previous run?" | [Performance Regression](#performance-regression) |
 
-### Enabling
+#### Enabling
 
 Pass the `enable_timing=True` keyword to `pycubrid.connect()`:
 
@@ -242,7 +594,7 @@ python my_workload.py
 The explicit keyword always wins over the environment variable. Async connections support
 the same keyword on `pycubrid.aio.connect()`.
 
-### Reading the stats
+#### Reading the stats
 
 ```python
 cur = conn.cursor()
@@ -275,7 +627,7 @@ if conn.timing_stats is not None:
     print(conn.timing_stats)
 ```
 
-### Categories and granularity
+#### Categories and granularity
 
 | Category | What it covers |
 |---|---|
@@ -287,7 +639,7 @@ if conn.timing_stats is not None:
 All cursors created from a connection report into the same `TimingStats`. Stats are
 **per-connection**, cumulative since the last `reset()`.
 
-### Overhead and thread-safety
+#### Overhead and thread-safety
 
 - **Disabled** — the timing module is not imported; per-call cost is a single attribute
   read (`self._timing is None`).
@@ -297,7 +649,7 @@ All cursors created from a connection report into the same `TimingStats`. Stats 
   while a worker thread drives the connection. The connection itself remains
   `threadsafety = 1` (one connection per thread).
 
-### Limitations
+#### Timing limitations
 
 - Async timings include event-loop scheduling latency; treat them as client-side
   end-to-end latency, not pure server time.
@@ -308,12 +660,39 @@ All cursors created from a connection report into the same `TimingStats`. Stats 
 
 ---
 
-## Running Benchmarks
+## Known Limitations
 
-1. Clone the benchmark suite: `git clone https://github.com/cubrid-lab/cubrid-benchmark`.
-2. Start benchmark containers and databases as documented in that repository.
-3. Run the Python benchmark scenario (`pycubrid` vs `PyMySQL`) with the provided runner.
-4. Execute multiple rounds (the published run used 10000 rows x 5 rounds).
-5. Export and compare result artifacts (JSON/markdown tables) for trend analysis.
+- **Pure Python.** Packet encode/decode and row conversion run in the interpreter; there is no
+  C extension.
+- **`executemany()` holds the whole batch in memory.** The batch path renders every parameter
+  set into a SQL string before sending, then serialises all of them into one request. Client
+  memory grows with the number and size of the parameter sets; split very large sequences into
+  chunks.
+- **`fetchall()` materialises the result.** Use `fetchone()`, `fetchmany()` or iteration for
+  large result sets.
+- **Async timing includes the event loop.** See
+  [Sync and Async Characteristics](#sync-and-async-characteristics).
+- **The published 2026-03 numbers are [historical](#historical-results-2026-03-pycubrid-050).**
+  Use the [Current Release Baseline](#current-release-baseline) instead.
 
-For exact commands and benchmark harness details, use the benchmark repo README and scripts.
+---
+
+## Reproduction Guide
+
+1. Start a CUBRID server. The repository's `docker compose up -d` starts one on
+   `localhost:33000` with database `testdb` (see [Development](DEVELOPMENT.md)).
+2. Run the microbenchmarks on each version you compare, on the same host and server, and save
+   the JSON output.
+3. Compare the runs with `scripts/bench_regression.py`.
+4. For larger workloads, or to compare `pycubrid` with `CUBRIDdb` on the same server, use the
+   [cubrid-benchmark](https://github.com/cubrid-lab/cubrid-benchmark) harness. Set
+   `autocommit` explicitly for every driver.
+5. Report the result in a [Performance issue](../.github/ISSUE_TEMPLATE/performance.yml) with
+   the environment listed under [Benchmark Methodology](#benchmark-methodology).
+
+```bash
+docker compose up -d
+export CUBRID_TEST_URL="cubrid://dba@localhost:33000/testdb"
+pytest tests/test_benchmarks.py --benchmark-enable --benchmark-json=current.json
+python scripts/bench_regression.py --baseline baseline.json --current current.json
+```
