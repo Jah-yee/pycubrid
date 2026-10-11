@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **`typing.Self` for context-manager and iterator returns (#689)** —
+  `Connection.__enter__`, `Cursor.__enter__` / `__iter__`, `Lob.__enter__`,
+  `AsyncConnection.__aenter__` and `AsyncCursor.__aenter__` / `__aiter__` are now
+  annotated `-> Self` instead of the concrete class, so subclasses keep their own
+  type in `with` / `async with` blocks and `for` / `async for` loops. A static
+  contract module, `tests/typing_self_contract.py`, is part of `make typecheck` and
+  fails mypy if any of these annotations regresses. Annotations only; no runtime
+  change.
+
 ## [1.11.0] - 2026-10-11
 
 ### Added
@@ -495,14 +506,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   classifier is gone. CI no longer tests 3.10: the oldest integration pair is
   Python 3.11 × CUBRID 10.2, the full matrix covers Python 3.11–3.14 and the TLS
   lanes run on 3.11 and 3.14. No driver behavior changes on Python 3.11 or newer.
-
-### Added
-- **typing.Self for subclass-preserving context-manager and iterator returns (#689)** — `Connection.__enter__`, `Cursor.__enter__` / `__iter__`,
-  `Lob.__enter__`, `AsyncConnection.__aenter__` and `AsyncCursor.__aenter__` / `__aiter__` now return
-  `typing.Self` instead of their concrete types, ensuring that subclasses retain their own type
-  when used in ``with`` blocks or ``for`` loops. A static mypy contract module
-  (`tests/typing_self_contract.py`) is included in `make typecheck` to guard this contract
-  against regression at type-checking time.
 
 ### Changed
 - **The Python 3.10-only async TLS preflight probe is removed (#685)** —

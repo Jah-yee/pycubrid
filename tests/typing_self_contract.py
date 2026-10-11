@@ -1,7 +1,7 @@
-"""Static typing.Self contract for #689 (checked by mypy via `make typecheck`).
+"""Static ``typing.Self`` contract, checked by mypy via ``make typecheck``.
 
-This module is checked by mypy but never instantiated by pytest,
-so no __init__ overrides are needed and CodeQL finds no issues.
+The module is type-checked only: pytest does not collect it (no ``test_`` prefix)
+and nothing here is executed.
 """
 
 from __future__ import annotations
@@ -47,4 +47,4 @@ async def _async(conn: SubAsyncConnection, cur: SubAsyncCursor) -> None:
         assert_type(c, SubAsyncConnection)
     async with cur as k:
         assert_type(k, SubAsyncCursor)
-        assert_type(aiter(cur), SubAsyncCursor)
+    assert_type(aiter(cur), SubAsyncCursor)
