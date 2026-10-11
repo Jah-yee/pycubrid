@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### CI
+
+- **Repository-local issue closure in PRs** — the required `PR title` check now
+  rejects direct closing keywords targeting a different GitHub repository; local
+  `Closes #N` and cross-repository `Refs owner/repo#N` remain valid. PR body text
+  is treated as untrusted data, without checkout or token permissions. Fenced
+  examples (any fence length) and whole-line or multi-line HTML comments are
+  ignored in one pass; indented lines, fences inside a raw HTML block such as
+  `<details>` without a blank line, and comments sharing a line with text are
+  always checked. `Fixes:` with a colon, `_emphasis_` around the keyword and
+  `http://` or `www.` issue URLs are caught too. Regression tests cover each case.
+
 ## [1.11.0] - 2026-10-11
 
 ### Added
